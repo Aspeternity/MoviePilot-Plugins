@@ -1,9 +1,9 @@
 {
     "OrphanFilesCleaner": {
-        "name": "冗余文件清理",
-        "description": "自动清理Transmission中未做种的文件和空目录",
+        "name": "Transmission冗余文件清理",
+        "description": "查找并删除Transmission下载目录中未关联任何种子的冗余文件",
         "labels": "整理",
-        "version": "2.3.0",
+        "version": "2.3.1",
         "icon": "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png",
         "author": "Asp",
         "level": 1
