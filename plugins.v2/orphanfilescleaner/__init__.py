@@ -1,467 +1,311 @@
-from typing import List, Tuple, Dict, Any, Optional
-from pathlib import Path
-import os
-import logging
-from apscheduler.schedulers.background import BackgroundScheduler
-from app.core.config import settings
+from typing import List, Tuple, Dict, Any, Union
 from app.log import logger
 from app.modules.transmission import Transmission
-from transmission_rpc import Torrent
+from transmission_rpc.torrent import Torrent
 from app.plugins import _PluginBase
-from app.schemas.types import EventType, NotificationType
+import os
+import glob
 
-class OrphanFilesCleaner(_PluginBase):
-    """
-    Transmission 冗余文件清理插件
-    功能：定期扫描下载目录，删除未关联种子的文件和空目录
-    """
+class TransmissionCleaner(_PluginBase):
+    # Plugin metadata
+    plugin_name = "Transmission冗余文件清理"
+    plugin_desc = "查找并删除Transmission下载目录中未关联任何种子的冗余文件"
+    plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
+    plugin_version = "2.3.1"
+    plugin_author = "Asp"
+    author_url = "https://github.com/Aspeternity"
+    plugin_config_prefix = "transmissioncleaner_"
+    plugin_order = 31
+    auth_level = 1
 
-    # ==============================
-    #          插件元数据
-    # ==============================
-    plugin_name = "冗余文件清理"                   # 插件显示名称
-    plugin_desc = "自动清理Transmission中未做种的文件和空目录"  # 功能描述
-    plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"        # Material Design 图标
-    plugin_version = "2.3.0"                     # 语义化版本号
-    plugin_author = "Asp"                  # 开发者名称
-    author_url = "https://github.com/Aspeternity"   # 开发者链接
-    plugin_config_prefix = "orphancleaner_"      # 配置前缀
-    plugin_order = 35                            # 加载顺序
-    auth_level = 1                               # 权限等级（1=管理员）
-
-    def __init__(self):
-        """
-        插件初始化
-        """
-        super().__init__()
-        # 任务调度器实例
-        self._scheduler: Optional[BackgroundScheduler] = None
-        # 当前插件配置
-        self._current_config = {
-            "enabled": False,            # 启用状态
-            "cron": "0 0 * * *",          # 定时任务表达式
-            "host": "localhost",          # Transmission主机地址
-            "port": 9091,                 # Transmission端口
-            "username": "",               # 用户名
-            "password": "",               # 密码
-            "download_dir": "",           # 下载目录绝对路径
-            "delete_empty_dir": True,     # 是否删除空目录
-            "dry_run": True,              # 模拟运行模式
-            "onlyonce": False             # 立即运行一次
-        }
+    # Plugin configuration
+    _onlyonce: bool = False
+    _transmission: Transmission = None
+    _host: str = None
+    _port: int = None
+    _username: str = None
+    _password: str = None
+    _download_dir: str = None
+    _dry_run: bool = True  # Default to dry run for safety
 
     def init_plugin(self, config: dict = None):
-        """
-        插件初始化入口
-        :param config: 插件配置字典
-        """
-        # 合并传入配置
         if config:
-            self._current_config.update(config)
-            logger.debug(f"接收到新配置: {config}")
-
-        # 停止现有服务
-        self.stop_service()
-
-        # 如果插件已启用
-        if self._current_config.get("enabled"):
-            logger.info("插件初始化：启用状态")
-
-            # 立即运行一次
-            if self._current_config.get("onlyonce"):
-                logger.info("立即执行一次扫描任务")
-                self._scan_and_clean()
-                # 重置立即运行标志
-                self._current_config["onlyonce"] = False
-                self.update_config(self._current_config)
-
-            # 配置定时任务
-            cron = self._current_config.get("cron")
-            if cron:
-                try:
-                    # 初始化调度器
-                    self._scheduler = BackgroundScheduler(timezone=settings.TZ)
-                    # 解析cron表达式
-                    cron_params = self._parse_cron(cron)
-                    # 添加定时任务
-                    self._scheduler.add_job(
-                        func=self._scan_and_clean,
-                        trigger='cron',
-                        **cron_params
-                    )
-                    self._scheduler.start()
-                    logger.info(f"定时任务已启动，执行周期: {cron}")
-                except Exception as e:
-                    logger.error(f"定时任务配置失败: {str(e)}")
-                    self.post_message(
-                        mtype=NotificationType.Manual,
-                        title="插件初始化错误",
-                        text=f"定时任务配置错误: {str(e)}"
-                    )
-        else:
-            logger.info("插件初始化：禁用状态")
-
-    def _parse_cron(self, cron_str: str) -> dict:
-        """
-        解析标准cron表达式为APScheduler参数
-        :param cron_str: 分 时 日 月 周 格式的字符串
-        :return: 参数字典
-        :raises ValueError: 表达式无效时抛出
-        """
-        fields = cron_str.strip().split()
-        if len(fields) != 5:
-            raise ValueError("无效的cron表达式，需要5个字段：分 时 日 月 周")
-        return {
-            "minute": fields[0],
-            "hour": fields[1],
-            "day": fields[2],
-            "month": fields[3],
-            "day_of_week": fields[4]
-        }
-
-    def _get_active_files(self) -> set:
-        """
-        获取所有活跃种子的文件路径集合
-        :return: 文件绝对路径集合
-        """
-        active_files = set()
-        try:
-            # 初始化Transmission客户端
-            client = Transmission(
-                host=self._current_config["host"],
-                port=self._current_config["port"],
-                username=self._current_config["username"],
-                password=self._current_config["password"]
-            )
-            # 获取种子列表
-            torrents, error = client.get_torrents()
-            if error:
-                raise Exception(error)
+            self._onlyonce = config.get("onlyonce")
+            self._host = config.get("host")
+            self._port = config.get("port")
+            self._username = config.get("username")
+            self._password = config.get("password")
+            self._download_dir = config.get("download_dir")
+            self._dry_run = config.get("dry_run", True)
             
-            # 遍历种子收集文件路径
-            logger.debug(f"发现 {len(torrents)} 个活跃种子")
-            for torrent in torrents:
-                download_dir = Path(torrent.download_dir).resolve()
-                for file in torrent.files():
-                    file_path = (download_dir / file.name).resolve()
-                    active_files.add(str(file_path))
-            logger.debug(f"收集到 {len(active_files)} 个活跃文件路径")
-            return active_files
-        except Exception as e:
-            logger.error(f"获取活跃文件失败: {str(e)}")
-            self.post_message(
-                mtype=NotificationType.Manual,
-                title="连接错误",
-                text=f"无法连接Transmission: {str(e)}"
-            )
-            return set()
+        if self._onlyonce:
+            try:
+                self._transmission = Transmission(self._host, self._port, self._username, self._password)
+                self._task()
+                self._onlyonce = False
+                self.__update_config()
+            except Exception as e:
+                logger.error(f"初始化Transmission连接失败: {str(e)}")
 
-    def _scan_files(self) -> set:
-        """
-        扫描下载目录获取所有文件/目录路径
-        :return: 路径集合
-        """
-        all_files = set()
-        try:
-            download_path = Path(self._current_config["download_dir"]).resolve()
-            logger.debug(f"开始扫描目录: {download_path}")
-            # 递归遍历所有条目
-            for entry in download_path.rglob('*'):
-                all_files.add(str(entry.resolve()))
-            logger.debug(f"扫描到 {len(all_files)} 个文件/目录")
-            return all_files
-        except Exception as e:
-            logger.error(f"目录扫描失败: {str(e)}")
-            self.post_message(
-                mtype=NotificationType.Manual,
-                title="目录错误",
-                text=f"无法扫描目录: {str(e)}"
-            )
-            return set()
-
-    def _scan_and_clean(self):
-        """
-        执行扫描和清理操作
-        """
-        logger.info("========== 开始冗余文件扫描 ==========")
-        try:
-            # 验证必要配置
-            if not self._current_config["download_dir"]:
-                raise ValueError("未配置下载目录")
-
-            # 获取文件集合
-            active_files = self._get_active_files()
-            all_files = self._scan_files()
-            orphan_files = all_files - active_files
-            logger.info(f"发现 {len(orphan_files)} 个待处理项")
-
-            # 分类处理
-            deleted = []
-            files_to_delete = [Path(f) for f in orphan_files if Path(f).is_file()]
-            dirs_to_delete = [Path(f) for f in orphan_files if Path(f).is_dir()]
-
-            # 处理文件
-            for path in files_to_delete:
+    def _task(self):
+        if not self._transmission:
+            logger.error("Transmission客户端未初始化")
+            return
+            
+        if not self._download_dir:
+            logger.error("未配置下载目录")
+            return
+            
+        # Get all active torrents from Transmission
+        torrents, error = self._transmission.get_torrents()
+        if error:
+            logger.error(f"获取种子列表失败: {error}")
+            return
+            
+        # Get all files associated with active torrents
+        active_files = set()
+        for torrent in torrents:
+            try:
+                files = self._transmission.get_files(torrent.id)
+                for file in files:
+                    file_path = os.path.join(torrent.download_dir, file.name)
+                    active_files.add(os.path.normpath(file_path))
+            except Exception as e:
+                logger.warning(f"获取种子文件失败: {torrent.name}, 错误: {str(e)}")
+                continue
+                
+        # Walk through download directory to find redundant files
+        redundant_files = []
+        total_size = 0
+        
+        # Check for files directly in download directory
+        for root, dirs, files in os.walk(self._download_dir):
+            for file in files:
+                file_path = os.path.normpath(os.path.join(root, file))
+                if file_path not in active_files:
+                    redundant_files.append(file_path)
+                    total_size += os.path.getsize(file_path)
+                    
+        if not redundant_files:
+            logger.info("没有找到冗余文件")
+            return
+            
+        # Log found redundant files
+        logger.info(f"找到 {len(redundant_files)} 个冗余文件，总大小: {self._format_size(total_size)}")
+        for file in redundant_files:
+            logger.info(f"冗余文件: {file}")
+            
+        # Delete files if not in dry run mode
+        if not self._dry_run:
+            deleted_count = 0
+            deleted_size = 0
+            for file in redundant_files:
                 try:
-                    logger.debug(f"尝试删除文件: {path}")
-                    if not self._current_config["dry_run"]:
-                        path.unlink(missing_ok=True)
-                        deleted.append(str(path))
+                    file_size = os.path.getsize(file)
+                    os.remove(file)
+                    deleted_count += 1
+                    deleted_size += file_size
+                    logger.info(f"已删除: {file}")
                 except Exception as e:
-                    logger.error(f"文件删除失败 {path}: {str(e)}")
+                    logger.error(f"删除文件失败 {file}: {str(e)}")
+                    
+            logger.info(f"删除完成，共删除 {deleted_count} 个文件，释放空间: {self._format_size(deleted_size)}")
+        else:
+            logger.info("当前处于模拟模式，不会实际删除文件")
 
-            # 处理目录（按深度倒序）
-            dirs_to_delete.sort(key=lambda x: len(x.parts), reverse=True)
-            for path in dirs_to_delete:
-                if self._current_config["delete_empty_dir"] and not any(path.iterdir()):
-                    try:
-                        logger.debug(f"尝试删除目录: {path}")
-                        if not self._current_config["dry_run"]:
-                            path.rmdir()
-                            deleted.append(str(path))
-                    except Exception as e:
-                        logger.error(f"目录删除失败 {path}: {str(e)}")
+    def _format_size(self, size_bytes):
+        """Convert bytes to human-readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.2f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.2f} PB"
 
-            # 发送通知
-            self.post_message(
-                mtype=NotificationType.SiteMessage,
-                title="【清理完成】",
-                text=f"扫描目录: {self._current_config['download_dir']}\n"
-                     f"发现冗余项: {len(orphan_files)}\n"
-                     f"实际删除: {len(deleted)}\n"
-                     f"模拟模式: {'✅' if self._current_config['dry_run'] else '❌'}"
-            )
-            logger.info(f"清理完成，共删除 {len(deleted)} 项")
-        except Exception as e:
-            logger.error(f"扫描过程出错: {str(e)}")
-            self.post_message(
-                mtype=NotificationType.Manual,
-                title="【清理异常】",
-                text=f"错误信息: {str(e)}"
-            )
-        logger.info("========== 扫描任务结束 ==========\n")
+    def __update_config(self):
+        self.update_config({
+            "onlyonce": self._onlyonce,
+            "host": self._host,
+            "port": self._port,
+            "username": self._username,
+            "password": self._password,
+            "download_dir": self._download_dir,
+            "dry_run": self._dry_run
+        })
 
-    def stop_service(self):
-        """
-        停止插件服务
-        """
-        try:
-            if self._scheduler:
-                self._scheduler.remove_all_jobs()
-                if self._scheduler.running:
-                    self._scheduler.shutdown()
-                self._scheduler = None
-                logger.info("定时任务已停止")
-        except Exception as e:
-            logger.error(f"停止调度器失败: {str(e)}")
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
+        pass
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """
-        生成 Vuetify 配置表单
-        :return: (表单组件列表, 默认值字典)
-        """
         return [
             {
-                "component": "VForm",
-                "content": [
-                    # 第一行：核心开关组
+                'component': 'VForm',
+                'content': [
                     {
-                        "component": "VRow",
-                        "content": [
-                            # 启用开关
+                        'component': 'VRow',
+                        'content': [
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
                                     {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "v-model": "enabled",
-                                            "label": "启用插件",
-                                            "hint": "主控制开关",
-                                            "persistent-hint": True,
-                                            "color": "primary"
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'onlyonce',
+                                            'label': '立即运行一次',
                                         }
                                     }
                                 ]
                             },
-                            # 模拟模式
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
                                     {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "v-model": "dry_run",
-                                            "label": "模拟模式",
-                                            "hint": "测试运行不实际删除",
-                                            "persistent-hint": True,
-                                            "color": "warning"
-                                        }
-                                    }
-                                ]
-                            },
-                            # 删除空目录
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "v-model": "delete_empty_dir",
-                                            "label": "删除空目录",
-                                            "hint": "自动清理空文件夹",
-                                            "persistent-hint": True
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'dry_run',
+                                            'label': '模拟运行（不实际删除）',
                                         }
                                     }
                                 ]
                             }
                         ]
                     },
-                    # 第二行：目录与定时配置
                     {
-                        "component": "VRow",
-                        "content": [
-                            # 下载目录输入
+                        'component': 'VRow',
+                        'content': [
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "v-model": "download_dir",
-                                            "label": "下载目录",
-                                            "placeholder": "/data/downloads",
-                                            "rules": [{
-                                                "required": True,
-                                                "message": "必须填写下载目录",
-                                                "trigger": "blur"
-                                            }],
-                                            "prepend-icon": "mdi-folder",
-                                            "clearable": True
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'host',
+                                            'label': 'Transmission主机IP',
+                                            'placeholder': '192.168.1.100'
                                         }
                                     }
                                 ]
                             },
-                            # 定时任务配置
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "v-model": "cron",
-                                            "label": "执行周期",
-                                            "placeholder": "0 0 * * *",
-                                            "rules": [{
-                                                "required": True,
-                                                "message": "必须填写cron表达式",
-                                                "trigger": "blur"
-                                            }],
-                                            "prepend-icon": "mdi-clock",
-                                            "hint": "标准cron表达式（分 时 日 月 周）"
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'port',
+                                            'label': 'Transmission端口',
+                                            'placeholder': '9091'
                                         }
                                     }
                                 ]
                             }
                         ]
                     },
-                    # 第三行：连接配置
                     {
-                        "component": "VRow",
-                        "content": [
-                            # 主机地址
+                        'component': 'VRow',
+                        'content': [
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "v-model": "host",
-                                            "label": "主机地址",
-                                            "placeholder": "localhost",
-                                            "prepend-icon": "mdi-server"
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'username',
+                                            'label': '用户名',
+                                            'placeholder': 'admin'
                                         }
                                     }
                                 ]
                             },
-                            # 端口号
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "v-model": "port",
-                                            "label": "端口号",
-                                            "type": "number",
-                                            "placeholder": "9091",
-                                            "prepend-icon": "mdi-ethernet"
-                                        }
-                                    }
-                                ]
-                            },
-                            # 用户名
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "v-model": "username",
-                                            "label": "用户名",
-                                            "prepend-icon": "mdi-account"
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'password',
+                                            'label': '密码',
+                                            'placeholder': 'password'
                                         }
                                     }
                                 ]
                             }
                         ]
                     },
-                    # 第四行：密码与提示
                     {
-                        "component": "VRow",
-                        "content": [
-                            # 密码输入
+                        'component': 'VRow',
+                        'content': [
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12
+                                },
+                                'content': [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "v-model": "password",
-                                            "label": "密码",
-                                            "type": "password",
-                                            "prepend-icon": "mdi-lock",
-                                            "clearable": True
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'download_dir',
+                                            'label': '下载目录',
+                                            'placeholder': '/data/downloads'
                                         }
                                     }
                                 ]
-                            },
-                            # 提示信息
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
                                     {
-                                        "component": "VAlert",
-                                        "props": {
-                                            "type": "info",
-                                            "border": "left",
-                                            "colored-border": True,
-                                            "dense": True,
-                                            "icon": "mdi-information",
-                                            "text": "操作提示：\n"
-                                                    "1. 首次使用请开启模拟模式\n"
-                                                    "2. 确保下载目录与Transmission配置一致\n"
-                                                    "3. 修改配置后需重启插件"
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': '本插件会扫描Transmission下载目录，查找不属于任何活跃种子的文件\n'
+                                                    '建议首次使用时启用"模拟运行"模式，确认无误后再关闭模拟模式进行实际删除',
+                                            'style': 'white-space: pre-line;'
+                                        }
+                                    },
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'warning',
+                                            'variant': 'tonal',
+                                            'text': '警告：文件删除操作不可逆，请谨慎操作！',
+                                            'style': 'white-space: pre-line;'
                                         }
                                     }
                                 ]
@@ -470,26 +314,21 @@ class OrphanFilesCleaner(_PluginBase):
                     }
                 ]
             }
-        ], self._current_config
-
-    def update_config(self, config: dict):
-        """
-        更新配置到数据库
-        :param config: 新配置字典
-        """
-        self._current_config.update(config)
-        super().update_config(self._current_config)
-        logger.debug("配置已更新")
-
-    def get_state(self) -> bool:
-        """
-        获取插件启用状态
-        :return: 是否启用
-        """
-        return self._current_config.get("enabled", False)
+        ], {
+            "onlyonce": False,
+            "dry_run": True,
+            "host": "192.168.1.100",
+            "port": 9091,
+            "username": "admin",
+            "password": "password",
+            "download_dir": ""
+        }
 
     def get_page(self) -> List[dict]:
-        """
-        无独立页面返回空列表
-        """
-        return []
+        pass
+
+    def get_state(self) -> bool:
+        return self._onlyonce
+
+    def stop_service(self):
+        pass
