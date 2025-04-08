@@ -4,28 +4,21 @@ from app.modules.transmission import Transmission
 from transmission_rpc.torrent import Torrent
 from app.plugins import _PluginBase
 import os
+import glob
 
 class TransmissionCleaner(_PluginBase):
-    # 插件名称
+    # Plugin metadata
     plugin_name = "Transmission冗余文件清理"
-    # 插件描述
     plugin_desc = "查找并删除Transmission下载目录中未关联任何种子的冗余文件"
-    # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/cleaner.png"
-    # 插件版本
-    plugin_version = "1.2"
-    # 插件作者
+    plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
+    plugin_version = "1.3"
     plugin_author = "Asp"
-    # 作者主页
     author_url = "https://github.com/Aspeternity"
-    # 插件配置项ID前缀
     plugin_config_prefix = "transmissioncleaner_"
-    # 加载顺序
     plugin_order = 31
-    # 可使用的用户级别
     auth_level = 1
 
-    # 私有属性
+    # Plugin configuration
     _onlyonce: bool = False
     _transmission: Transmission = None
     _host: str = None
@@ -33,8 +26,7 @@ class TransmissionCleaner(_PluginBase):
     _username: str = None
     _password: str = None
     _download_dir: str = None
-    _dry_run: bool = True
-    _connection_status: str = "未测试"
+    _dry_run: bool = True  # Default to dry run for safety
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -45,7 +37,6 @@ class TransmissionCleaner(_PluginBase):
             self._password = config.get("password")
             self._download_dir = config.get("download_dir")
             self._dry_run = config.get("dry_run", True)
-            self._connection_status = config.get("connection_status", "未测试")
             
         if self._onlyonce:
             try:
@@ -55,7 +46,6 @@ class TransmissionCleaner(_PluginBase):
                 self.__update_config()
             except Exception as e:
                 logger.error(f"初始化Transmission连接失败: {str(e)}")
-                self._connection_status = f"连接失败: {str(e)}"
 
     def _task(self):
         if not self._transmission:
@@ -66,13 +56,13 @@ class TransmissionCleaner(_PluginBase):
             logger.error("未配置下载目录")
             return
             
-        # 获取所有活跃种子
+        # Get all active torrents from Transmission
         torrents, error = self._transmission.get_torrents()
         if error:
             logger.error(f"获取种子列表失败: {error}")
             return
             
-        # 获取所有活跃种子关联的文件
+        # Get all files associated with active torrents
         active_files = set()
         for torrent in torrents:
             try:
@@ -84,10 +74,11 @@ class TransmissionCleaner(_PluginBase):
                 logger.warning(f"获取种子文件失败: {torrent.name}, 错误: {str(e)}")
                 continue
                 
-        # 查找冗余文件
+        # Walk through download directory to find redundant files
         redundant_files = []
         total_size = 0
         
+        # Check for files directly in download directory
         for root, dirs, files in os.walk(self._download_dir):
             for file in files:
                 file_path = os.path.normpath(os.path.join(root, file))
@@ -99,8 +90,12 @@ class TransmissionCleaner(_PluginBase):
             logger.info("没有找到冗余文件")
             return
             
+        # Log found redundant files
         logger.info(f"找到 {len(redundant_files)} 个冗余文件，总大小: {self._format_size(total_size)}")
-        
+        for file in redundant_files:
+            logger.info(f"冗余文件: {file}")
+            
+        # Delete files if not in dry run mode
         if not self._dry_run:
             deleted_count = 0
             deleted_size = 0
@@ -118,23 +113,8 @@ class TransmissionCleaner(_PluginBase):
         else:
             logger.info("当前处于模拟模式，不会实际删除文件")
 
-    def _test_connection(self):
-        """测试Transmission连接"""
-        try:
-            self._transmission = Transmission(self._host, self._port, self._username, self._password)
-            stats = self._transmission.get_session_stats()
-            if stats:
-                self._connection_status = "连接成功"
-                logger.info("Transmission连接测试成功")
-                return True
-        except Exception as e:
-            self._connection_status = f"连接失败: {str(e)}"
-            logger.error(f"Transmission连接测试失败: {str(e)}")
-            return False
-        return False
-
     def _format_size(self, size_bytes):
-        """格式化文件大小"""
+        """Convert bytes to human-readable format"""
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
             if size_bytes < 1024.0:
                 return f"{size_bytes:.2f} {unit}"
@@ -149,57 +129,17 @@ class TransmissionCleaner(_PluginBase):
             "username": self._username,
             "password": self._password,
             "download_dir": self._download_dir,
-            "dry_run": self._dry_run,
-            "connection_status": self._connection_status
+            "dry_run": self._dry_run
         })
-
-    def get_state(self) -> bool:
-        return self._onlyonce
-
-    def stop_service(self):
-        pass
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        """
-        定义插件命令
-        """
-        return [{
-            "cmd": "/transmission_clean",
-            "event": "cmd",
-            "desc": "Transmission冗余文件清理",
-            "category": "下载器",
-            "data": {
-                "action": "transmission_clean"
-            }
-        }]
+        pass
 
     def get_api(self) -> List[Dict[str, Any]]:
-        """
-        定义插件API
-        """
-        return [{
-            "path": "/test_connection",
-            "endpoint": self.test_connection,
-            "methods": ["GET"],
-            "summary": "测试Transmission连接",
-            "description": "测试Transmission连接状态"
-        }]
-
-    def test_connection(self):
-        """
-        API接口：测试连接
-        """
-        success = self._test_connection()
-        return {
-            "success": success,
-            "message": self._connection_status
-        }
+        pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """
-        定义插件配置表单
-        """
         return [
             {
                 'component': 'VForm',
@@ -354,51 +294,6 @@ class TransmissionCleaner(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '连接状态: ' + self._connection_status,
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VBtn',
-                                        'props': {
-                                            'block': True,
-                                            'variant': 'tonal',
-                                            'prepend-icon': 'mdi-connection',
-                                            'text': '测试Transmission连接',
-                                            'color': 'primary',
-                                            '@click': 'transmissioncleaner_test_connection'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
                                             'text': '本插件会扫描Transmission下载目录，查找不属于任何活跃种子的文件\n'
                                                     '建议首次使用时启用"模拟运行"模式，确认无误后再关闭模拟模式进行实际删除',
                                             'style': 'white-space: pre-line;'
@@ -426,9 +321,14 @@ class TransmissionCleaner(_PluginBase):
             "port": 9091,
             "username": "admin",
             "password": "password",
-            "download_dir": "",
-            "connection_status": "未测试"
+            "download_dir": ""
         }
 
     def get_page(self) -> List[dict]:
+        pass
+
+    def get_state(self) -> bool:
+        return self._onlyonce
+
+    def stop_service(self):
         pass
