@@ -20,17 +20,17 @@ class OrphanFilesCleaner(PluginBase):
     # 插件描述
     plugin_desc = "自动扫描Transmission下载目录，清理未关联种子的冗余文件和空目录。"
     # 插件图标（建议使用HTTPS链接）
-    plugin_icon = "https://example.com/cleaner.png"
+    plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
     # 插件版本（语义化版本格式）
-    plugin_version = "2.0.0"
+    plugin_version = "1.0.0"
     # 插件作者
-    plugin_author = "Your Name"
+    plugin_author = "Asp"
     # 作者主页
-    author_url = "https://github.com/yourname"
+    author_url = "https://github.com/Aspeternity"
     # 插件配置前缀（用于数据库存储）
     plugin_config_prefix = "orphancleaner_"
     # 插件加载顺序（数字越小越先加载）
-    plugin_order = 35
+    plugin_order = 0
     # 权限级别（0-普通用户 1-管理员）
     auth_level = 1
 
