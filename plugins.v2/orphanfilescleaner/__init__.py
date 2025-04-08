@@ -12,7 +12,7 @@ from app.schemas.types import EventType, NotificationType
 from app.db import db
 from app.db.models import Plugin
 
-class OrphanFilesCleaner(PluginBase):
+class OrphanFilesCleaner(_PluginBase):
     """
     Transmission 冗余文件清理插件 (MoviePilot V2 优化版)
     功能：自动扫描并删除未关联种子的文件和空目录
