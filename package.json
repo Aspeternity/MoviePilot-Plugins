@@ -3,7 +3,7 @@
         "name": "冗余文件清理",
         "description": "自动扫描Transmission下载目录，清理未关联种子的冗余文件和空目录。",
         "labels": "文件整理",
-        "version": "1.0",
+        "version": "1.2",
         "icon": "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png",
         "author": "Asp",
         "level": 1,
