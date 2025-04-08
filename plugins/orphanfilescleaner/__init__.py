@@ -20,7 +20,7 @@ class OrphanFilesCleaner(PluginBase):
     #          插件元数据
     # ==============================
     plugin_name = "冗余文件清理"                   # 插件显示名称
-    plugin_desc = "清理Transmission中未做种的文件"  # 功能描述
+    plugin_desc = "自动扫描Transmission下载目录，清理未关联种子的冗余文件和空目录。"  # 功能描述
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"        # Material Design 图标
     plugin_version = "1.2"                     # 语义化版本号
     plugin_author = "Asp"                  # 开发者名称
