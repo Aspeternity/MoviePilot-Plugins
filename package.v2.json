@@ -1,5 +1,5 @@
 {
-    "OrphanFilesCleaner": {
+    "TransmissionCleaner": {
         "name": "Transmission冗余文件清理",
         "description": "查找并删除Transmission下载目录中未关联任何种子的冗余文件",
         "labels": "整理",
