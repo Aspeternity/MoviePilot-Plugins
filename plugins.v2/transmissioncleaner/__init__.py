@@ -12,7 +12,7 @@ class TransmissionCleaner(_PluginBase):
     plugin_desc = "查找并删除Transmission下载目录中未关联任何种子的冗余文件"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
     plugin_version = "1.3"
-    plugin_author = "Asp"
+    plugin_author = "Aspeternity"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissioncleaner_"
     plugin_order = 31
