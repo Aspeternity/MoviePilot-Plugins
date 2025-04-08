@@ -7,7 +7,7 @@ from app.core.config import settings
 from app.log import logger
 from app.modules.transmission import Transmission
 from transmission_rpc import Torrent
-from app.plugins.plugin import PluginBase
+from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
 from app.db import db
 from app.db.models import Plugin
