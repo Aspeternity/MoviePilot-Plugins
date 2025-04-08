@@ -15,7 +15,7 @@ class TransmissionCleaner(_PluginBase):
     plugin_author = "Asp"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissioncleaner_"
-    plugin_order = 31
+    plugin_order = 1
     auth_level = 1
 
     # Plugin configuration
