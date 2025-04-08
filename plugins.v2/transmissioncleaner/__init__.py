@@ -11,7 +11,7 @@ class TransmissionCleaner(_PluginBase):
     plugin_name = "Transmission冗余文件清理"
     plugin_desc = "查找并删除Transmission下载目录中未关联任何种子的冗余文件"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
-    plugin_version = "1.3"
+    plugin_version = "1.4"
     plugin_author = "Aspeternity"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissioncleaner_"
@@ -27,6 +27,7 @@ class TransmissionCleaner(_PluginBase):
     _password: str = None
     _download_dir: str = None
     _dry_run: bool = True  # Default to dry run for safety
+    _delete_images_nfo: bool = False  # 新增：是否删除图片/NFO文件
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -37,6 +38,7 @@ class TransmissionCleaner(_PluginBase):
             self._password = config.get("password")
             self._download_dir = config.get("download_dir")
             self._dry_run = config.get("dry_run", True)
+            self._delete_images_nfo = config.get("delete_images_nfo", False)  # 加载配置
             
         if self._onlyonce:
             try:
@@ -83,6 +85,13 @@ class TransmissionCleaner(_PluginBase):
             for file in files:
                 file_path = os.path.normpath(os.path.join(root, file))
                 if file_path not in active_files:
+                    # 新增：根据用户选择过滤图片/NFO文件
+                    if not self._delete_images_nfo:
+                        # 如果用户不选择删除图片/NFO，则跳过这些文件
+                        file_ext = os.path.splitext(file)[1].lower()
+                        if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.nfo', '.txt']:
+                            logger.debug(f"跳过图片/NFO文件: {file_path}")
+                            continue
                     redundant_files.append(file_path)
                     total_size += os.path.getsize(file_path)
                     
@@ -129,7 +138,8 @@ class TransmissionCleaner(_PluginBase):
             "username": self._username,
             "password": self._password,
             "download_dir": self._download_dir,
-            "dry_run": self._dry_run
+            "dry_run": self._dry_run,
+            "delete_images_nfo": self._delete_images_nfo  # 保存新配置项
         })
 
     @staticmethod
@@ -151,7 +161,7 @@ class TransmissionCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 6
+                                    'md': 4
                                 },
                                 'content': [
                                     {
@@ -167,7 +177,7 @@ class TransmissionCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 6
+                                    'md': 4
                                 },
                                 'content': [
                                     {
@@ -175,6 +185,22 @@ class TransmissionCleaner(_PluginBase):
                                         'props': {
                                             'model': 'dry_run',
                                             'label': '模拟运行（不实际删除）',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'delete_images_nfo',
+                                            'label': '删除图片/NFO文件',
                                         }
                                     }
                                 ]
@@ -295,7 +321,8 @@ class TransmissionCleaner(_PluginBase):
                                             'type': 'info',
                                             'variant': 'tonal',
                                             'text': '本插件会扫描Transmission下载目录，查找不属于任何活跃种子的文件\n'
-                                                    '建议首次使用时启用"模拟运行"模式，确认无误后再关闭模拟模式进行实际删除',
+                                                    '建议首次使用时启用"模拟运行"模式，确认无误后再关闭模拟模式进行实际删除\n'
+                                                    '若未勾选"删除图片/NFO文件"，则跳过.jpg/.png/.nfo等文件',
                                             'style': 'white-space: pre-line;'
                                         }
                                     },
@@ -317,6 +344,7 @@ class TransmissionCleaner(_PluginBase):
         ], {
             "onlyonce": False,
             "dry_run": True,
+            "delete_images_nfo": False,  # 默认不删除图片/NFO
             "host": "192.168.1.100",
             "port": 9091,
             "username": "admin",
