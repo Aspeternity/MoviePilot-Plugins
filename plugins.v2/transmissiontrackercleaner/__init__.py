@@ -17,9 +17,9 @@ class TransmissionTrackerCleaner(_PluginBase):
 
     # ==================== 插件元数据 ====================
     plugin_name = "Transmission失效种子清理"
-    plugin_desc = "三重检测机制清理失效种子"
+    plugin_desc = "定时清理Transmission中Tracker失效的种子及文件"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/delete.png"
-    plugin_version = "1.3"
+    plugin_version = "1.2"
     plugin_author = "Aspeternity"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissiontrackercleaner_"
