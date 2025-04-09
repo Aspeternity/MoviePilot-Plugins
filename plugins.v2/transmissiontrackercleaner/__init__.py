@@ -9,19 +9,19 @@ from app.core.event import eventmanager, Event
 
 class TransmissionTrackerCleaner(_PluginBase):
     """
-    Transmission错误种子清理插件
-    增强版：改进错误检测逻辑，增加调试信息
+    Transmission Tracker状态全面清理插件
+    检测所有种子的Tracker状态，不论种子当前状态
     """
-    
+
     # 插件元数据
     plugin_name = "Transmission失效种子清理"
     plugin_desc = "定时清理Transmission中Tracker失效的种子及文件"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
-    plugin_version = "1.6"
+    plugin_version = "1.8"
     plugin_author = "Aspeternity"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissiontrackercleaner_"
-    plugin_order = 32
+    plugin_order = 33
     auth_level = 1
 
     # 插件配置项
@@ -34,20 +34,18 @@ class TransmissionTrackerCleaner(_PluginBase):
     _password: str = None
     _delete_files: bool = True
     _dry_run: bool = True
-    _error_patterns: List[str] = [
+    _tracker_patterns: List[str] = [
         "Torrent not exists",
-        "not registered", 
+        "not registered",
         "未注册",
-        "error",
-        "fail",
-        "unavailable"
+        "unregistered",
+        "not found",
+        "torrent does not exist"
     ]
     _last_run_time: str = None
 
     def init_plugin(self, config: dict = None):
-        """
-        初始化插件
-        """
+        """初始化插件"""
         if config:
             self._enabled = config.get("enabled", False)
             self._onlyonce = config.get("onlyonce", False)
@@ -58,169 +56,118 @@ class TransmissionTrackerCleaner(_PluginBase):
             self._delete_files = config.get("delete_files", True)
             self._dry_run = config.get("dry_run", True)
             
-            error_patterns_str = config.get("error_patterns", "")
-            self._error_patterns = [p.strip() for p in error_patterns_str.split('\n') if p.strip()]
+            patterns_str = config.get("tracker_patterns", "")
+            self._tracker_patterns = [p.strip() for p in patterns_str.split('\n') if p.strip()]
             
         if self._onlyonce:
             try:
-                logger.info("正在初始化Transmission连接...")
                 self._transmission = Transmission(
-                    self._host, 
-                    self._port, 
-                    self._username, 
-                    self._password
+                    self._host, self._port, 
+                    self._username, self._password
                 )
-                logger.info("Transmission连接成功，开始执行清理任务...")
                 self._task()
                 self._onlyonce = False
                 self.__update_config()
             except Exception as e:
-                logger.error(f"Transmission连接初始化失败: {str(e)}")
-                # 尝试重新连接
-                try:
-                    self._transmission = Transmission(
-                        self._host,
-                        self._port,
-                        self._username,
-                        self._password
-                    )
-                    logger.info("重新连接Transmission成功，重试任务...")
-                    self._task()
-                    self._onlyonce = False
-                    self.__update_config()
-                except Exception as e2:
-                    logger.error(f"重试连接Transmission失败: {str(e2)}")
+                logger.error(f"Transmission连接失败: {str(e)}")
 
     def _task(self):
-        """
-        执行清理任务，增强错误检测逻辑
-        """
+        """执行清理任务，检查所有种子的Tracker状态"""
         if not self._transmission:
-            logger.error("Transmission客户端未初始化，无法执行任务")
+            logger.error("Transmission客户端未初始化")
             return
             
-        logger.info("开始深度检查Transmission中的错误种子...")
+        logger.info("开始全面检测所有种子的Tracker状态...")
         self._last_run_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # 获取所有种子（包括所有状态）
+        # 获取所有种子
         try:
             torrents, error = self._transmission.get_torrents()
             if error:
-                logger.error("获取种子列表时Transmission返回错误")
+                logger.error("获取种子列表失败")
                 return
         except Exception as e:
-            logger.error(f"获取种子列表时发生异常: {str(e)}")
+            logger.error(f"获取种子列表时出错: {str(e)}")
             return
             
-        # 调试：记录种子总数和基本信息
-        logger.debug(f"共获取到 {len(torrents)} 个种子")
         if not torrents:
-            logger.info("Transmission中没有种子")
+            logger.info("没有找到任何种子")
             return
             
         deleted_count = 0
-        no_error_count = 0
-        matched_error_count = 0
-        error_code_dist = {}  # 错误码统计
+        matched_count = 0
         
         for torrent in torrents:
-            # 获取种子详细信息
-            error_code = getattr(torrent, "error", 0)
-            error_str = getattr(torrent, "errorString", "") or ""
+            # 获取种子基本信息
+            torrent_id = getattr(torrent, "id", "")
+            name = getattr(torrent, "name", "")
             status = getattr(torrent, "status", "unknown")
             
-            # 统计错误码分布
-            if error_code not in error_code_dist:
-                error_code_dist[error_code] = 0
-            error_code_dist[error_code] += 1
+            # 获取Tracker状态信息
+            tracker_stats = getattr(torrent, "trackerStats", [])
+            tracker_messages = []
             
-            # 调试日志
-            logger.debug(
-                f"种子检查: ID={torrent.id}, 名称='{torrent.name}'\n"
-                f"状态={status}, 错误码={error_code}, 错误信息='{error_str}'\n"
-                f"Tracker状态: {getattr(torrent, 'trackerStats', '无信息')}"
-            )
+            # 收集所有Tracker消息
+            for tracker in tracker_stats:
+                if hasattr(tracker, "lastAnnounceResult"):
+                    msg = getattr(tracker, "lastAnnounceResult", "")
+                    if msg:
+                        tracker_messages.append(msg.lower())
             
-            # 检查是否有错误（错误码不为0表示有错误）
-            if error_code == 0:
-                no_error_count += 1
-                continue
-                
-            # 检查错误信息是否匹配任何模式（不区分大小写）
+            # 检查Tracker消息是否匹配任何模式
             is_match = False
-            lower_error_str = error_str.lower()
-            for pattern in self._error_patterns:
-                if pattern.lower() in lower_error_str:
+            for msg in tracker_messages:
+                if any(pattern.lower() in msg for pattern in self._tracker_patterns):
                     is_match = True
                     break
                     
             if not is_match:
-                logger.debug(
-                    f"种子 {torrent.name} 的错误信息不匹配任何模式\n"
-                    f"错误信息: '{error_str}'\n"
-                    f"当前模式: {self._error_patterns}"
-                )
                 continue
                 
-            matched_error_count += 1
+            matched_count += 1
             logger.info(
-                f"发现匹配的错误种子: {torrent.name} (ID: {torrent.id})\n"
-                f"错误码: {error_code}, 错误详情: '{error_str}'\n"
-                f"Tracker状态: {getattr(torrent, 'trackerStats', '无信息')}"
+                f"发现Tracker异常的种子: {name} (ID: {torrent_id})\n"
+                f"状态: {status}, Tracker消息: {tracker_messages}"
             )
             
-            # 模拟运行模式只记录不删除
+            # 模拟运行模式
             if self._dry_run:
-                logger.info(f"[模拟模式] 将删除种子: {torrent.name} (ID: {torrent.id})")
+                logger.info(f"[模拟] 将删除种子: {name}")
                 deleted_count += 1
                 continue
                 
-            # 实际删除操作
+            # 实际删除
             try:
-                logger.info(f"正在删除种子: {torrent.name} (ID: {torrent.id})...")
                 if self._transmission.delete_torrents(
-                    delete_file=self._delete_files, 
-                    ids=torrent.id
+                    delete_file=self._delete_files,
+                    ids=torrent_id
                 ):
-                    logger.info(f"成功删除种子: {torrent.name} (ID: {torrent.id})")
+                    logger.info(f"已删除种子: {name}")
                     deleted_count += 1
                 else:
-                    logger.error(f"删除种子失败: {torrent.name} (ID: {torrent.id})")
+                    logger.error(f"删除种子失败: {name}")
             except Exception as e:
-                logger.error(
-                    f"删除种子时发生异常: {torrent.name} (ID: {torrent.id})\n"
-                    f"错误: {str(e)}"
-                )
+                logger.error(f"删除种子时出错: {name}, 错误: {str(e)}")
                 
-        # 输出详细的统计信息
+        # 输出统计信息
         logger.info("="*50)
-        logger.info("任务执行结果统计:")
-        logger.info(f"检查种子总数: {len(torrents)}")
-        logger.info(f"无错误种子: {no_error_count}")
-        logger.info(f"匹配的错误种子: {matched_error_count}")
-        logger.info("错误码分布统计:")
-        for code, count in error_code_dist.items():
-            logger.info(f"错误码 {code}: {count} 个种子")
+        logger.info(f"检测完成: 共检查 {len(torrents)} 个种子")
+        logger.info(f"发现Tracker异常的种子: {matched_count} 个")
+        logger.info(f"处理种子: {deleted_count} 个")
         
-        if matched_error_count == 0:
-            logger.warning("未发现匹配的错误种子，可能原因:")
-            logger.warning("1. 错误信息不匹配当前配置的模式")
-            logger.warning("2. Transmission返回的错误信息格式有变化")
-            logger.warning("3. 种子可能处于其他错误状态")
-            logger.warning(f"当前配置的错误模式: {self._error_patterns}")
-            logger.warning("建议检查调试日志中的具体错误信息")
-        else:
-            if self._dry_run:
-                logger.info(f"模拟运行完成，共发现 {deleted_count} 个需要删除的错误种子")
-            else:
-                logger.info(f"删除完成，共删除 {deleted_count} 个错误种子")
+        if matched_count == 0:
+            logger.warning(
+                "未发现Tracker异常的种子，可能原因:\n"
+                "1. Tracker消息不匹配当前配置的模式\n"
+                "2. 确实没有Tracker异常的种子\n"
+                f"当前配置的匹配模式: {self._tracker_patterns}\n"
+                "请检查日志中的Tracker原始消息"
+            )
         
         self.__update_config()
 
     def __update_config(self):
-        """
-        更新插件配置
-        """
+        """更新配置"""
         self.update_config({
             "enabled": self._enabled,
             "onlyonce": self._onlyonce,
@@ -230,38 +177,12 @@ class TransmissionTrackerCleaner(_PluginBase):
             "password": self._password,
             "delete_files": self._delete_files,
             "dry_run": self._dry_run,
-            "error_patterns": "\n".join(self._error_patterns),
+            "tracker_patterns": "\n".join(self._tracker_patterns),
             "last_run_time": self._last_run_time
         })
 
-    def get_state(self) -> bool:
-        """
-        获取插件状态
-        """
-        return self._enabled
-
-    def stop_service(self):
-        """
-        停止插件服务
-        """
-        pass
-
-    @eventmanager.register(EventType.PluginAction)
-    def handle_manual_clean(self, event: Event):
-        """
-        处理手动清理事件
-        """
-        if event:
-            event_data = event.event_data
-            if not event_data or event_data.get("action") != "transmission_error_clean":
-                return
-            logger.info("收到手动清理错误种子命令，开始执行...")
-            self._task()
-
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """
-        获取插件配置表单
-        """
+        """获取配置表单"""
         return [
             {
                 'component': 'VForm',
@@ -271,10 +192,7 @@ class TransmissionTrackerCleaner(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
+                                'props': {'cols': 12, 'md': 3},
                                 'content': [
                                     {
                                         'component': 'VSwitch',
@@ -287,10 +205,7 @@ class TransmissionTrackerCleaner(_PluginBase):
                             },
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
+                                'props': {'cols': 12, 'md': 3},
                                 'content': [
                                     {
                                         'component': 'VSwitch',
@@ -303,32 +218,26 @@ class TransmissionTrackerCleaner(_PluginBase):
                             },
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'delete_files',
-                                            'label': '删除文件',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
+                                'props': {'cols': 12, 'md': 3},
                                 'content': [
                                     {
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'dry_run',
                                             'label': '模拟运行',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 3},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'delete_files',
+                                            'label': '删除文件',
                                         }
                                     }
                                 ]
@@ -340,16 +249,13 @@ class TransmissionTrackerCleaner(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [
                                     {
                                         'component': 'VTextField',
                                         'props': {
                                             'model': 'host',
-                                            'label': 'Transmission主机IP',
+                                            'label': 'Transmission主机',
                                             'placeholder': '192.168.1.100'
                                         }
                                     }
@@ -357,16 +263,13 @@ class TransmissionTrackerCleaner(_PluginBase):
                             },
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [
                                     {
                                         'component': 'VTextField',
                                         'props': {
                                             'model': 'port',
-                                            'label': 'Transmission端口',
+                                            'label': '端口',
                                             'placeholder': '9091'
                                         }
                                     }
@@ -379,10 +282,7 @@ class TransmissionTrackerCleaner(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [
                                     {
                                         'component': 'VTextField',
@@ -396,10 +296,7 @@ class TransmissionTrackerCleaner(_PluginBase):
                             },
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [
                                     {
                                         'component': 'VTextField',
@@ -418,16 +315,14 @@ class TransmissionTrackerCleaner(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12
-                                },
+                                'props': {'cols': 12},
                                 'content': [
                                     {
                                         'component': 'VTextarea',
                                         'props': {
-                                            'model': 'error_patterns',
-                                            'label': '错误信息匹配模式(每行一个)',
-                                            'placeholder': 'Torrent not exists\n未注册\nerror',
+                                            'model': 'tracker_patterns',
+                                            'label': 'Tracker错误匹配模式(每行一个)',
+                                            'placeholder': 'Torrent not exists\n未注册\ntorrent does not exist',
                                             'rows': 3,
                                             'auto-grow': True
                                         }
@@ -441,25 +336,21 @@ class TransmissionTrackerCleaner(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
+                                'props': {'cols': 12},
                                 'content': [
                                     {
                                         'component': 'VAlert',
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '使用说明:\n'
-                                                    '1. 启用插件后可以立即运行一次\n'
-                                                    '2. "模拟运行"模式下只记录不实际删除\n'
-                                                    '3. 错误模式匹配不区分大小写\n'
-                                                    '4. 常见错误模式示例:\n'
+                                            'text': '插件功能说明:\n'
+                                                    '1. 检测所有种子的Tracker状态，不论种子当前状态\n'
+                                                    '2. 常见Tracker错误模式:\n'
                                                     '   - Torrent not exists\n'
                                                     '   - not registered\n'
                                                     '   - 未注册\n'
-                                                    '   - tracker error\n'
-                                                    '   - unavailable',
+                                                    '   - torrent does not exist\n'
+                                                    '3. 建议首次使用时启用"模拟运行"模式',
                                             'style': 'white-space: pre-line;'
                                         }
                                     },
@@ -478,10 +369,9 @@ class TransmissionTrackerCleaner(_PluginBase):
                                             'type': 'warning',
                                             'variant': 'tonal',
                                             'text': '重要提示:\n'
-                                                    '1. 文件删除操作不可逆！\n'
-                                                    '2. 建议首次使用时启用"模拟运行"模式\n'
-                                                    '3. 如果检测不到错误种子，请检查调试日志\n'
-                                                    '4. 确保错误模式匹配实际的错误信息',
+                                                    '1. 删除操作不可逆，请谨慎使用\n'
+                                                    '2. 如果检测不到种子，请检查Tracker消息是否匹配\n'
+                                                    '3. 可以添加更多匹配模式以提高检测率',
                                             'style': 'white-space: pre-line;'
                                         }
                                     }
@@ -494,20 +384,18 @@ class TransmissionTrackerCleaner(_PluginBase):
         ], {
             "enabled": False,
             "onlyonce": False,
-            "delete_files": True,
             "dry_run": True,
+            "delete_files": True,
             "host": "192.168.1.100",
             "port": 9091,
             "username": "admin",
             "password": "password",
-            "error_patterns": "Torrent not exists\n未注册\nerror",
+            "tracker_patterns": "Torrent not exists\n未注册\ntorrent does not exist",
             "last_run_time": None
         }
 
     def get_page(self) -> List[dict]:
-        """
-        获取插件页面
-        """
+        """获取插件页面"""
         return [
             {
                 'component': 'div',
@@ -526,13 +414,9 @@ class TransmissionTrackerCleaner(_PluginBase):
         ]
 
     def get_api(self) -> List[Dict[str, Any]]:
-        """
-        获取API
-        """
+        """获取API"""
         pass
 
     def get_command(self) -> List[Dict[str, Any]]:
-        """
-        获取命令
-        """
+        """获取命令"""
         pass
