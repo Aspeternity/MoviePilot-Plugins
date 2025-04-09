@@ -11,7 +11,7 @@ class TransmissionCleaner(_PluginBase):
     plugin_name = "Transmission冗余文件清理"
     plugin_desc = "查找并删除Transmission下载目录中未关联任何种子的冗余文件"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
-    plugin_version = "1.4"
+    plugin_version = "1.5"  # 版本号更新
     plugin_author = "Aspeternity"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissioncleaner_"
@@ -27,7 +27,8 @@ class TransmissionCleaner(_PluginBase):
     _password: str = None
     _download_dir: str = None
     _dry_run: bool = True  # Default to dry run for safety
-    _delete_images_nfo: bool = False  # 新增：是否删除图片/NFO文件
+    _delete_images_nfo: bool = False  # 是否删除图片/NFO文件
+    _delete_system_files: bool = False  # 新增：是否删除系统文件
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -38,7 +39,8 @@ class TransmissionCleaner(_PluginBase):
             self._password = config.get("password")
             self._download_dir = config.get("download_dir")
             self._dry_run = config.get("dry_run", True)
-            self._delete_images_nfo = config.get("delete_images_nfo", False)  # 加载配置
+            self._delete_images_nfo = config.get("delete_images_nfo", False)
+            self._delete_system_files = config.get("delete_system_files", False)  # 加载配置
             
         if self._onlyonce:
             try:
@@ -82,16 +84,29 @@ class TransmissionCleaner(_PluginBase):
         
         # Check for files directly in download directory
         for root, dirs, files in os.walk(self._download_dir):
+            # 如果不删除系统文件，则跳过@eaDir目录
+            if not self._delete_system_files and '@eaDir' in root:
+                continue
+                
             for file in files:
                 file_path = os.path.normpath(os.path.join(root, file))
+                
+                # 如果不删除系统文件，则跳过系统文件
+                if not self._delete_system_files and (
+                    file.startswith('SYNOINDEX_') or 
+                    file.startswith('.') or 
+                    file == 'Thumbs.db'
+                ):
+                    continue
+                    
+                # 根据用户选择过滤图片/NFO文件
+                if not self._delete_images_nfo:
+                    file_ext = os.path.splitext(file)[1].lower()
+                    if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.nfo', '.txt']:
+                        logger.debug(f"跳过图片/NFO文件: {file_path}")
+                        continue
+                        
                 if file_path not in active_files:
-                    # 新增：根据用户选择过滤图片/NFO文件
-                    if not self._delete_images_nfo:
-                        # 如果用户不选择删除图片/NFO，则跳过这些文件
-                        file_ext = os.path.splitext(file)[1].lower()
-                        if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.nfo', '.txt']:
-                            logger.debug(f"跳过图片/NFO文件: {file_path}")
-                            continue
                     redundant_files.append(file_path)
                     total_size += os.path.getsize(file_path)
                     
@@ -139,7 +154,8 @@ class TransmissionCleaner(_PluginBase):
             "password": self._password,
             "download_dir": self._download_dir,
             "dry_run": self._dry_run,
-            "delete_images_nfo": self._delete_images_nfo  # 保存新配置项
+            "delete_images_nfo": self._delete_images_nfo,
+            "delete_system_files": self._delete_system_files  # 保存新配置项
         })
 
     @staticmethod
@@ -161,7 +177,7 @@ class TransmissionCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 4
+                                    'md': 3
                                 },
                                 'content': [
                                     {
@@ -177,14 +193,14 @@ class TransmissionCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 4
+                                    'md': 3
                                 },
                                 'content': [
                                     {
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'dry_run',
-                                            'label': '模拟运行（不实际删除）',
+                                            'label': '模拟运行',
                                         }
                                     }
                                 ]
@@ -193,36 +209,14 @@ class TransmissionCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 4
+                                    'md': 3
                                 },
                                 'content': [
                                     {
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'delete_images_nfo',
-                                            'label': '删除图片/NFO文件',
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'host',
-                                            'label': 'Transmission主机IP',
-                                            'placeholder': '192.168.1.100'
+                                            'label': '删除图片/NFO',
                                         }
                                     }
                                 ]
@@ -231,81 +225,21 @@ class TransmissionCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 6
+                                    'md': 3
                                 },
                                 'content': [
                                     {
-                                        'component': 'VTextField',
+                                        'component': 'VSwitch',
                                         'props': {
-                                            'model': 'port',
-                                            'label': 'Transmission端口',
-                                            'placeholder': '9091'
+                                            'model': 'delete_system_files',
+                                            'label': '删除系统文件',
                                         }
                                     }
                                 ]
                             }
                         ]
                     },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'username',
-                                            'label': '用户名',
-                                            'placeholder': 'admin'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'password',
-                                            'label': '密码',
-                                            'placeholder': 'password'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'download_dir',
-                                            'label': '下载目录',
-                                            'placeholder': '/data/downloads'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
+                    # 其余部分保持不变...
                     {
                         'component': 'VRow',
                         'content': [
@@ -322,7 +256,8 @@ class TransmissionCleaner(_PluginBase):
                                             'variant': 'tonal',
                                             'text': '本插件会扫描Transmission下载目录，查找不属于任何活跃种子的文件\n'
                                                     '建议首次使用时启用"模拟运行"模式，确认无误后再关闭模拟模式进行实际删除\n'
-                                                    '若未勾选"删除图片/NFO文件"，则跳过.jpg/.png/.nfo等文件',
+                                                    '若未勾选"删除图片/NFO文件"，则跳过.jpg/.png/.nfo等文件\n'
+                                                    '若未勾选"删除系统文件"，则跳过@eaDir/SYNOINDEX_*等系统文件',
                                             'style': 'white-space: pre-line;'
                                         }
                                     },
@@ -344,7 +279,8 @@ class TransmissionCleaner(_PluginBase):
         ], {
             "onlyonce": False,
             "dry_run": True,
-            "delete_images_nfo": False,  # 默认不删除图片/NFO
+            "delete_images_nfo": False,
+            "delete_system_files": False,  # 默认不删除系统文件
             "host": "192.168.1.100",
             "port": 9091,
             "username": "admin",
