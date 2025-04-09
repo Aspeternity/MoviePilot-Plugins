@@ -4,19 +4,22 @@ from app.modules.transmission import Transmission
 from transmission_rpc.torrent import Torrent
 from app.plugins import _PluginBase
 from apscheduler.schedulers.background import BackgroundScheduler
-import os
+import re
 
 class TransmissionTrackerCleaner(_PluginBase):
     """
-    Transmission失效种子清理插件
-    功能：定时清理Transmission中Tracker返回特定错误信息的种子及关联文件
+    Transmission失效种子清理插件（增强版）
+    功能：通过三重检测机制清理失效种子：
+    1. 种子errorString字段检测
+    2. Tracker返回消息检测
+    3. 错误状态+0分享率组合检测
     """
-    
+
     # ==================== 插件元数据 ====================
     plugin_name = "Transmission失效种子清理"
-    plugin_desc = "定时清理Transmission中Tracker失效的种子及文件"
+    plugin_desc = "三重检测机制清理失效种子"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/delete.png"
-    plugin_version = "1.1"  # 版本更新
+    plugin_version = "1.3"
     plugin_author = "Aspeternity"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissiontrackercleaner_"
@@ -26,84 +29,104 @@ class TransmissionTrackerCleaner(_PluginBase):
     # ==================== 初始化配置 ====================
     def __init__(self):
         super().__init__()
-        # 插件配置项
-        self._enabled = False  # 是否启用插件
-        self._cron = ""  # 定时任务cron表达式
-        self._onlyonce = False  # 是否立即运行一次
-        self._enable_periodic = False  # 是否启用周期性巡检
-        self._transmission = None  # Transmission客户端实例
-        self._host = None  # Transmission主机地址
-        self._port = None  # Transmission端口
-        self._username = None  # 用户名
-        self._password = None  # 密码
-        # 需要匹配的Tracker错误信息列表（默认值）
+        # 基础配置
+        self._enabled = False
+        self._cron = ""
+        self._onlyonce = False
+        self._enable_periodic = False
+        self._transmission = None
+        self._host = None
+        self._port = None
+        self._username = None
+        self._password = None
+        
+        # 错误检测配置
         self._tracker_errors = [
-            "torrent not exists", 
+            "torrent not exists",
             "unregistered torrent",
             "torrent not registered",
-            "not registered"
+            "not registered",
+            "torrent does not exist",
+            "this torrent does not exist",
+            "could not find torrent",
+            "invalid info hash",
+            "torrent not found",
+            "未注册的种子",
+            "该种子未注册"
         ]
-        self._delete_files = True  # 是否删除文件
-        self._dry_run = True  # 是否模拟运行（不实际删除）
-        self._scheduler = None  # 定时任务调度器实例
+        
+        # 操作配置
+        self._delete_files = True
+        self._dry_run = True
+        self._debug_mode = False
+        self._scheduler = None
 
     def init_plugin(self, config: dict = None):
-        """
-        初始化插件
-        :param config: 插件配置字典
-        """
+        """初始化插件"""
         if config:
-            # 从配置中加载各项参数
+            # 基础配置
             self._enabled = config.get("enabled", False)
             self._cron = config.get("cron", "")
             self._onlyonce = config.get("onlyonce", False)
-            self._enable_periodic = config.get("enable_periodic", False)  # 新增周期性巡检开关
+            self._enable_periodic = config.get("enable_periodic", False)
             self._host = config.get("host")
             self._port = config.get("port")
             self._username = config.get("username")
             self._password = config.get("password")
-            # 处理Tracker错误配置（按行分割并去除空行和前后空格）
-            self._tracker_errors = [x.strip().lower() for x in config.get("tracker_errors", "").split("\n") if x.strip()]
+            self._debug_mode = config.get("debug_mode", False)
+            
+            # 合并错误配置
+            custom_errors = [
+                x.strip().lower() 
+                for x in config.get("tracker_errors", "").split("\n") 
+                if x.strip()
+            ]
+            self._tracker_errors = list(set(self._tracker_errors + custom_errors))
+            
+            # 操作配置
             self._delete_files = config.get("delete_files", True)
             self._dry_run = config.get("dry_run", True)
 
-        # 停止现有服务（避免重复初始化）
+        # 停止现有服务
         self.stop_service()
 
-        # 如果插件启用或设置了立即运行
         if self._enabled or self._onlyonce:
             try:
-                # 初始化Transmission客户端
-                self._transmission = Transmission(self._host, self._port, self._username, self._password)
+                self._transmission = Transmission(
+                    host=self._host,
+                    port=self._port,
+                    username=self._username,
+                    password=self._password
+                )
             except Exception as e:
-                logger.error(f"初始化Transmission连接失败: {str(e)}")
+                logger.error(f"Transmission连接失败: {str(e)}")
                 return
 
-            # 设置定时任务（仅在启用周期性巡检时）
-            if self._enable_periodic and self._cron:
-                self._scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-                # 将cron表达式解析为调度器参数
-                self._scheduler.add_job(self._task, 'cron', **self._parse_cron(self._cron))
-                self._scheduler.start()
-                logger.info(f"定时服务启动，执行周期: {self._cron}")
-            elif self._enable_periodic and not self._cron:
-                logger.warning("已启用周期性巡检但未设置cron表达式，定时任务将不会运行")
+            # 定时任务设置
+            if self._enable_periodic:
+                if not self._cron:
+                    logger.warning("已启用周期性巡检但未设置cron表达式")
+                else:
+                    self._scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+                    self._scheduler.add_job(
+                        self._task,
+                        'cron',
+                        **self._parse_cron(self._cron)
+                    )
+                    self._scheduler.start()
+                    logger.info(f"定时任务启动，执行周期: {self._cron}")
 
-            # 立即运行一次
+            # 立即执行一次
             if self._onlyonce:
                 self._task()
                 self._onlyonce = False
-                self.__update_config()  # 更新配置（主要是重置onlyonce标志）
+                self.__update_config()
 
     def _parse_cron(self, cron_str: str) -> dict:
-        """
-        解析cron表达式为APScheduler参数
-        :param cron_str: cron表达式字符串（如 "0 3 * * *"）
-        :return: 解析后的参数字典
-        """
+        """解析cron表达式"""
         parts = cron_str.split()
-        if len(parts) != 5:  # 如果不是标准的5部分cron表达式
-            return {"second": "0"}  # 默认每分钟运行
+        if len(parts) != 5:
+            return {"second": "0"}
         return {
             "minute": parts[0],
             "hour": parts[1],
@@ -113,259 +136,369 @@ class TransmissionTrackerCleaner(_PluginBase):
         }
 
     def _task(self):
-        """
-        主任务逻辑：检查并清理失效种子
-        """
+        """主任务执行入口"""
         if not self._transmission:
             logger.error("Transmission客户端未初始化")
             return
 
-        # 获取所有种子
+        # 获取种子列表
         torrents, error = self._transmission.get_torrents()
         if error:
-            logger.error(f"获取种子列表失败: {error}")
+            logger.error("获取种子列表失败")
             return
 
-        # 找出需要删除的种子
+        # 检测失效种子
+        to_remove = self._check_invalid_torrents(torrents)
+        
+        # 处理失效种子
+        self._process_invalid_torrents(to_remove)
+
+    def _check_invalid_torrents(self, torrents: List[Torrent]) -> List[Torrent]:
+        """
+        三重检测机制发现失效种子
+        返回: 需要删除的种子列表
+        """
         to_remove = []
+        
         for torrent in torrents:
             try:
-                # 检查tracker信息
-                if not hasattr(torrent, 'trackers') or not torrent.trackers:
+                # 调试信息
+                self._log_debug_info(torrent)
+                
+                # 检测维度1：种子错误状态
+                if self._check_by_error_string(torrent):
+                    to_remove.append(torrent)
                     continue
-
-                # 检查每个Tracker的返回信息
-                for tracker in torrent.trackers:
-                    # 获取tracker最后返回信息（兼容不同字段名）
-                    last_announce = tracker.get('lastAnnounceResult') or tracker.get('last_announce_result') or ""
-                    if not last_announce:
-                        continue
-                        
-                    # 检查是否包含配置的错误信息
-                    tracker_msg = last_announce.lower()
-                    if any(error_msg in tracker_msg for error_msg in self._tracker_errors):
-                        to_remove.append(torrent)
-                        logger.info(f"发现失效种子: {torrent.name} (Tracker错误: {last_announce})")
-                        break  # 找到一个错误就足够
-
+                    
+                # 检测维度2：Tracker返回消息
+                if self._check_by_tracker_messages(torrent):
+                    to_remove.append(torrent)
+                    continue
+                    
+                # 检测维度3：错误状态+0分享率
+                if self._check_by_error_ratio(torrent):
+                    to_remove.append(torrent)
+                    
             except Exception as e:
-                logger.warning(f"检查种子失败: {torrent.name}, 错误: {str(e)}")
-                continue
+                logger.warning(f"检查种子失败 {getattr(torrent, 'name', '未知')}: {str(e)}")
+                
+        return to_remove
 
+    def _log_debug_info(self, torrent: Torrent):
+        """记录调试信息"""
+        if not self._debug_mode:
+            return
+            
+        logger.debug(f"\n{'='*30}")
+        logger.debug(f"检查种子: {getattr(torrent, 'name', '未知名称')}")
+        logger.debug(f"状态: {getattr(torrent, 'status', '未知状态')}")
+        logger.debug(f"错误码: {getattr(torrent, 'error', '无')}")
+        logger.debug(f"错误信息: {getattr(torrent, 'errorString', '无')}")
+        logger.debug(f"分享率: {getattr(torrent, 'uploadRatio', '无')}")
+        
+        if hasattr(torrent, 'trackers') and torrent.trackers:
+            for i, tracker in enumerate(torrent.trackers[:3]):  # 只显示前3个tracker
+                logger.debug(f"Tracker{i+1}: {tracker.get('announce', '未知地址')}")
+                logger.debug(f"最后消息: {tracker.get('lastAnnounceResult', '无')}")
+
+    def _check_by_error_string(self, torrent: Torrent) -> bool:
+        """通过errorString字段检测"""
+        if not hasattr(torrent, 'errorString') or not torrent.errorString:
+            return False
+            
+        error_msg = torrent.errorString.lower()
+        clean_msg = re.sub(r'[^\w\s]', '', error_msg)  # 移除标点符号
+        
+        for err in self._tracker_errors:
+            if err in clean_msg:
+                logger.info(f"[错误状态] 发现失效种子: {torrent.name} | 错误: {torrent.errorString}")
+                return True
+        return False
+
+    def _check_by_tracker_messages(self, torrent: Torrent) -> bool:
+        """通过Tracker消息检测"""
+        if not hasattr(torrent, 'trackers') or not torrent.trackers:
+            return False
+
+        for tracker in torrent.trackers:
+            # 兼容不同版本字段名
+            msg = (tracker.get('lastAnnounceResult') or 
+                  tracker.get('last_announce_result') or 
+                  tracker.get('announceResult') or "")
+                  
+            if not msg:
+                continue
+                
+            # 标准化处理
+            clean_msg = re.sub(r'[^\w\s]', '', msg.lower())
+            
+            for err in self._tracker_errors:
+                if err in clean_msg:
+                    logger.info(f"[Tracker消息] 发现失效种子: {torrent.name} | 消息: {msg}")
+                    return True
+        return False
+
+    def _check_by_error_ratio(self, torrent: Torrent) -> bool:
+        """通过错误状态+0分享率检测"""
+        return (
+            hasattr(torrent, 'status') and 
+            torrent.status == 'error' and 
+            hasattr(torrent, 'uploadRatio') and 
+            torrent.uploadRatio == 0
+        )
+
+    def _process_invalid_torrents(self, to_remove: List[Torrent]):
+        """处理失效种子"""
         if not to_remove:
-            logger.info("没有找到失效种子")
+            logger.info("✅ 未检测到失效种子")
             return
 
-        # 处理需要删除的种子
-        logger.info(f"找到 {len(to_remove)} 个失效种子")
-        removed_count = 0
-        removed_size = 0
+        logger.info(f"⚠️ 发现 {len(to_remove)} 个失效种子")
+        success_count = 0
 
         for torrent in to_remove:
             try:
-                size = torrent.total_size  # 获取种子大小
+                torrent_name = getattr(torrent, 'name', '未知种子')
                 
-                if not self._dry_run:  # 非模拟模式才实际删除
-                    if self._delete_files:  # 根据配置决定是否删除文件
-                        self._transmission.delete_torrents(delete_file=True, ids=[torrent.hashString])
-                        logger.info(f"已删除种子及文件: {torrent.name}")
-                    else:
-                        self._transmission.delete_torrents(delete_file=False, ids=[torrent.hashString])
-                        logger.info(f"已删除种子(保留文件): {torrent.name}")
+                if self._dry_run:
+                    logger.info(f"[模拟删除] {torrent_name}")
+                    continue
                     
-                    removed_count += 1
-                    removed_size += size
-                else:  # 模拟模式只记录日志
-                    logger.info(f"[模拟] 将删除种子: {torrent.name} (大小: {self._format_size(size)})")
-
+                # 实际删除操作
+                deleted = self._transmission.delete_torrents(
+                    delete_file=self._delete_files,
+                    ids=[torrent.hashString]
+                )
+                
+                if deleted:
+                    success_count += 1
+                    logger.info(f"🗑️ 已删除: {torrent_name}")
+                else:
+                    logger.error(f"❌ 删除失败: {torrent_name}")
+                    
             except Exception as e:
-                logger.error(f"删除种子失败 {torrent.name}: {str(e)}")
+                logger.error(f"❌ 删除异常 {torrent_name}: {str(e)}")
 
-        # 输出结果摘要
+        # 结果汇总
         if not self._dry_run:
-            logger.info(f"清理完成，共删除 {removed_count} 个种子，释放空间: {self._format_size(removed_size)}")
-        else:
-            logger.info(f"[模拟] 共发现 {len(to_remove)} 个待清理种子")
-
-    def _format_size(self, size_bytes):
-        """
-        将字节数转换为易读的格式（如KB、MB、GB）
-        :param size_bytes: 字节数
-        :return: 格式化后的字符串
-        """
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size_bytes < 1024.0:
-                return f"{size_bytes:.2f} {unit}"
-            size_bytes /= 1024.0
-        return f"{size_bytes:.2f} PB"
+            logger.info(f"💯 清理完成，成功删除 {success_count}/{len(to_remove)} 个种子")
 
     def __update_config(self):
         """更新插件配置"""
         self.update_config({
+            # 基础配置
             "enabled": self._enabled,
             "cron": self._cron,
             "onlyonce": self._onlyonce,
-            "enable_periodic": self._enable_periodic,  # 新增配置项
+            "enable_periodic": self._enable_periodic,
+            "debug_mode": self._debug_mode,
+            # 连接配置
             "host": self._host,
             "port": self._port,
             "username": self._username,
             "password": self._password,
-            "tracker_errors": "\n".join(self._tracker_errors),  # 将列表转换为换行分隔的字符串
+            # 操作配置
+            "tracker_errors": "\n".join(self._tracker_errors),
             "delete_files": self._delete_files,
             "dry_run": self._dry_run
         })
 
-    # ==================== 插件接口方法 ====================
-    @staticmethod
-    def get_command() -> List[Dict[str, Any]]:
-        """获取插件命令（暂未实现）"""
-        pass
-
-    def get_api(self) -> List[Dict[str, Any]]:
-        """获取API（暂未实现）"""
-        pass
-
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """
-        获取插件配置表单
-        :return: (表单组件列表, 表单默认值字典)
-        """
+        """获取配置表单"""
         return [
-            # 表单布局结构
             {
                 'component': 'VForm',
                 'content': [
-                    # 第一行：开关按钮
+                    # 第一行：功能开关
                     {
                         'component': 'VRow',
                         'content': [
-                            # 启用插件开关
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 3},
-                                'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]
+                                'content': [{
+                                    'component': 'VSwitch',
+                                    'props': {
+                                        'model': 'enabled',
+                                        'label': '启用插件',
+                                    }
+                                }]
                             },
-                            # 立即运行一次开关
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 3},
-                                'content': [{'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行一次'}}]
+                                'content': [{
+                                    'component': 'VSwitch',
+                                    'props': {
+                                        'model': 'debug_mode',
+                                        'label': '调试模式',
+                                        'hint': '显示详细检测日志'
+                                    }
+                                }]
                             },
-                            # 启用周期性巡检开关（新增）
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 3},
-                                'content': [{'component': 'VSwitch', 'props': {
-                                    'model': 'enable_periodic', 
-                                    'label': '启用周期性巡检',
-                                    'hint': '开启时务必填写cron表达式'
-                                }}]
+                                'content': [{
+                                    'component': 'VSwitch',
+                                    'props': {
+                                        'model': 'enable_periodic',
+                                        'label': '启用周期性巡检',
+                                        'hint': '需配合cron表达式使用'
+                                    }
+                                }]
                             },
-                            # 模拟运行开关
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 3},
-                                'content': [{'component': 'VSwitch', 'props': {'model': 'dry_run', 'label': '模拟运行'}}]
+                                'content': [{
+                                    'component': 'VSwitch',
+                                    'props': {
+                                        'model': 'dry_run',
+                                        'label': '模拟运行',
+                                        'hint': '只记录不实际删除'
+                                    }
+                                }]
                             }
                         ]
                     },
-                    # 第二行：删除选项
+                    
+                    # 第二行：连接配置
                     {
                         'component': 'VRow',
                         'content': [
-                            # 删除文件开关
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 4},
-                                'content': [{'component': 'VSwitch', 'props': {'model': 'delete_files', 'label': '删除文件'}}]
-                            }
-                        ]
-                    },
-                    # 第三行：Transmission连接配置
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            # 主机地址输入框
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 6},
-                                'content': [{'component': 'VTextField', 'props': {
-                                    'model': 'host', 
-                                    'label': 'Transmission主机IP',
-                                    'placeholder': '192.168.1.100'
-                                }}]
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {
+                                        'model': 'host',
+                                        'label': 'Transmission地址',
+                                        'placeholder': '192.168.1.100'
+                                    }
+                                }]
                             },
-                            # 端口输入框
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 6},
-                                'content': [{'component': 'VTextField', 'props': {
-                                    'model': 'port', 
-                                    'label': 'Transmission端口',
-                                    'placeholder': '9091'
-                                }}]
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {
+                                        'model': 'port',
+                                        'label': '端口',
+                                        'placeholder': '9091'
+                                    }
+                                }]
                             }
                         ]
                     },
-                    # 第四行：认证信息
+                    
+                    # 第三行：认证信息
                     {
                         'component': 'VRow',
                         'content': [
-                            # 用户名输入框
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 6},
-                                'content': [{'component': 'VTextField', 'props': {
-                                    'model': 'username', 
-                                    'label': '用户名',
-                                    'placeholder': 'admin'
-                                }}]
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {
+                                        'model': 'username',
+                                        'label': '用户名',
+                                        'placeholder': 'admin'
+                                    }
+                                }]
                             },
-                            # 密码输入框
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 6},
-                                'content': [{'component': 'VTextField', 'props': {
-                                    'model': 'password', 
-                                    'label': '密码',
-                                    'placeholder': 'password'
-                                }}]
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {
+                                        'model': 'password',
+                                        'label': '密码',
+                                        'type': 'password',
+                                        'placeholder': 'password'
+                                    }
+                                }]
                             }
                         ]
                     },
-                    # 第五行：定时任务配置
+                    
+                    # 第四行：定时设置
                     {
                         'component': 'VRow',
                         'content': [
-                            # cron表达式输入框
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 6},
-                                'content': [{'component': 'VTextField', 'props': {
-                                    'model': 'cron', 
-                                    'label': '定时清理周期(cron表达式)',
-                                    'placeholder': '0 3 * * *',
-                                    'hint': '开启周期性巡检时必填'
-                                }}]
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {
+                                        'model': 'cron',
+                                        'label': '定时周期(cron)',
+                                        'placeholder': '0 3 * * *',
+                                        'hint': '启用周期性巡检时必填'
+                                    }
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [{
+                                    'component': 'VSwitch',
+                                    'props': {
+                                        'model': 'delete_files',
+                                        'label': '删除文件',
+                                        'hint': '是否同时删除文件'
+                                    }
+                                }]
                             }
                         ]
                     },
-                    # 第六行：Tracker错误配置
+                    
+                    # 第五行：错误配置
                     {
                         'component': 'VRow',
                         'content': [
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12},
-                                'content': [{'component': 'VTextarea', 'props': {
-                                    'model': 'tracker_errors', 
-                                    'label': 'Tracker错误信息(每行一个)',
-                                    'placeholder': 'torrent not exists\nunregistered torrent',
-                                    'rows': 3
-                                }}]
+                                'content': [{
+                                    'component': 'VTextarea',
+                                    'props': {
+                                        'model': 'tracker_errors',
+                                        'label': '错误关键词(每行一个)',
+                                        'rows': 3,
+                                        'placeholder': 'unregistered torrent\ntorrent not exists'
+                                    }
+                                }]
                             }
                         ]
                     },
+                    
+                    # 第六行：操作按钮
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [{
+                                    'component': 'VBtn',
+                                    'props': {
+                                        'block': True,
+                                        'variant': 'tonal',
+                                        'prepend-icon': 'mdi-cached',
+                                        'text': '立即运行一次',
+                                        'click': 'onlyonce=true'
+                                    }
+                                }]
+                            }
+                        ]
+                    },
+                    
                     # 第七行：说明信息
                     {
                         'component': 'VRow',
@@ -374,28 +507,28 @@ class TransmissionTrackerCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {'cols': 12},
                                 'content': [
-                                    # 信息提示
                                     {
                                         'component': 'VAlert',
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '本插件会检查Transmission中的种子，清理Tracker返回特定错误信息的种子\n'
-                                                    '常见PT站删除种子错误信息: "torrent not exists", "unregistered torrent"\n'
-                                                    '建议首次使用时启用"模拟运行"模式，确认无误后再关闭模拟模式\n'
-                                                    '定时任务使用cron表达式，例如: "0 3 * * *"表示每天凌晨3点执行\n'
-                                                    '开启"周期性巡检"时才会启用定时任务',
+                                            'text': '🔍 三重检测机制说明：\n'
+                                                   '1. 种子errorString字段检测\n'
+                                                   '2. Tracker返回消息检测\n'
+                                                   '3. 错误状态+0分享率组合检测\n\n'
+                                                   '💡 首次使用建议开启调试模式和模拟运行',
                                             'style': 'white-space: pre-line;'
                                         }
                                     },
-                                    # 警告信息
                                     {
                                         'component': 'VAlert',
                                         'props': {
                                             'type': 'warning',
                                             'variant': 'tonal',
-                                            'text': '警告：种子和文件删除操作不可逆，请谨慎操作！\n'
-                                                    '开启周期性巡检时务必填写正确的cron表达式',
+                                            'text': '⚠️ 警告：\n'
+                                                   '• 文件删除操作不可逆\n'
+                                                   '• 启用周期性巡检需设置cron表达式\n'
+                                                   '• 实际删除前请确认模拟运行结果',
                                             'style': 'white-space: pre-line;'
                                         }
                                     }
@@ -404,37 +537,44 @@ class TransmissionTrackerCleaner(_PluginBase):
                         ]
                     }
                 ]
+            },
+            {
+                # 默认值
+                "enabled": False,
+                "debug_mode": False,
+                "enable_periodic": False,
+                "dry_run": True,
+                "delete_files": True,
+                "host": "192.168.1.100",
+                "port": 9091,
+                "username": "admin",
+                "password": "password",
+                "cron": "0 3 * * *",
+                "tracker_errors": "unregistered torrent\ntorrent not exists"
             }
-        ], {
-            # 表单默认值
-            "enabled": False,
-            "cron": "0 3 * * *",  # 默认每天凌晨3点运行
-            "onlyonce": False,
-            "enable_periodic": False,  # 默认关闭周期性巡检
-            "delete_files": True,
-            "dry_run": True,
-            "host": "192.168.1.100",
-            "port": 9091,
-            "username": "admin",
-            "password": "password",
-            "tracker_errors": "torrent not exists\nunregistered torrent"  # 默认错误匹配
-        }
-
-    def get_page(self) -> List[dict]:
-        """获取插件页面（暂未实现）"""
-        pass
-
-    def get_state(self) -> bool:
-        """获取插件状态"""
-        return self._enabled
+        ]
 
     def stop_service(self):
         """停止插件服务"""
         try:
             if self._scheduler:
-                self._scheduler.remove_all_jobs()  # 移除所有任务
+                self._scheduler.remove_all_jobs()
                 if self._scheduler.running:
-                    self._scheduler.shutdown()  # 关闭调度器
+                    self._scheduler.shutdown()
                 self._scheduler = None
         except Exception as e:
             logger.error(f"停止定时任务失败: {str(e)}")
+
+    # 保持其他必要接口方法
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
+        return []
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        return []
+
+    def get_page(self) -> List[dict]:
+        return []
+
+    def get_state(self) -> bool:
+        return self._enabled
