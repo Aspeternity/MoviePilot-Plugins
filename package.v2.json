@@ -3,11 +3,12 @@
         "name": "Transmission冗余文件清理",
         "description": "查找并删除Transmission下载目录中未关联任何种子的冗余文件",
         "labels": "整理",
-        "version": "1.6",
+        "version": "1.7",
         "icon": "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png",
         "author": "Aspeternity",
         "level": 1,
         "history": {
+          "v1.7": "新增多目录支持",   
           "v1.6": "修复上一版的Bug",             
           "v1.5": "新增是否删除系统文件",       
           "v1.4": "是否删除图片/NFO文件",
