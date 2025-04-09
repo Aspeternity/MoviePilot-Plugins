@@ -6,92 +6,96 @@ from transmission_rpc.torrent import Torrent
 from app.plugins import _PluginBase
 from app.schemas.types import EventType
 from app.core.event import eventmanager, Event
-from apscheduler.triggers.cron import CronTrigger
-import time
-import re
 
 class TransmissionTrackerCleaner(_PluginBase):
-    # Plugin metadata
+    """
+    Transmission错误种子清理插件
+    功能：检查并删除Transmission中处于错误状态的种子及其文件
+    特点：
+    1. 支持模拟运行模式（只记录不实际删除）
+    2. 支持立即执行一次
+    3. 可配置错误信息匹配模式
+    4. 可选择是否删除文件
+    """
+
+    # 插件元数据
     plugin_name = "Transmission失效种子清理"
     plugin_desc = "定时清理Transmission中Tracker失效的种子及文件"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
-    plugin_version = "1.4"
+    plugin_version = "1.5"
     plugin_author = "Aspeternity"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissiontrackercleaner_"
     plugin_order = 32
     auth_level = 1
 
-    # Plugin configuration
-    _enabled: bool = False
-    _cron: str = "0 12 * * *"  # 默认每天中午12点运行
-    _onlyonce: bool = False
-    _transmission: Transmission = None
-    _host: str = None
-    _port: int = None
-    _username: str = None
-    _password: str = None
-    _delete_files: bool = True
-    _dry_run: bool = True  # 新增模拟运行选项
-    _error_patterns: List[str] = ["Torrent not exists", "not registered", "未注册"]
-    _last_run_time: str = None
+    # 插件配置项
+    _enabled: bool = False                # 是否启用插件
+    _onlyonce: bool = False               # 是否立即运行一次
+    _transmission: Transmission = None    # Transmission客户端实例
+    _host: str = None                     # Transmission主机地址
+    _port: int = None                     # Transmission端口
+    _username: str = None                 # 用户名
+    _password: str = None                 # 密码
+    _delete_files: bool = True            # 是否删除文件
+    _dry_run: bool = True                 # 是否模拟运行（只记录不删除）
+    _error_patterns: List[str] = [        # 错误信息匹配模式
+        "Torrent not exists", 
+        "not registered", 
+        "未注册"
+    ]
+    _last_run_time: str = None            # 上次运行时间
 
     def init_plugin(self, config: dict = None):
+        """
+        初始化插件
+        :param config: 插件配置
+        """
         if config:
+            # 从配置中加载各参数
             self._enabled = config.get("enabled", False)
-            self._cron = config.get("cron", "0 12 * * *")
             self._onlyonce = config.get("onlyonce", False)
             self._host = config.get("host")
             self._port = config.get("port")
             self._username = config.get("username")
             self._password = config.get("password")
             self._delete_files = config.get("delete_files", True)
-            self._dry_run = config.get("dry_run", True)  # 新增模拟运行选项
+            self._dry_run = config.get("dry_run", True)
+            
+            # 处理错误匹配模式（多行文本转换为列表）
             error_patterns_str = config.get("error_patterns", "")
             self._error_patterns = [p.strip() for p in error_patterns_str.split('\n') if p.strip()]
             
-        # 停止现有任务
-        self.stop_service()
-        
-        # 启动新任务
-        if self._enabled or self._onlyonce:
-            self._transmission = Transmission(self._host, self._port, self._username, self._password)
-            
-            # 立即运行一次
-            if self._onlyonce:
-                logger.info("Transmission错误种子清理服务启动，立即运行一次")
-                self._scheduler.add_job(self._task, 'date',
-                                       run_date=datetime.now() + timedelta(seconds=3),
-                                       name="Transmission错误种子清理")
-                # 关闭一次性标志
+        # 如果设置了立即运行一次，则执行任务
+        if self._onlyonce:
+            try:
+                # 初始化Transmission客户端
+                self._transmission = Transmission(
+                    self._host, 
+                    self._port, 
+                    self._username, 
+                    self._password
+                )
+                # 执行清理任务
+                self._task()
+                # 重置立即运行标志
                 self._onlyonce = False
+                # 更新配置
                 self.__update_config()
-                
-            # 启动周期任务
-            if self._enabled:
-                try:
-                    # 解析cron表达式
-                    if self._cron:
-                        try:
-                            cron_trigger = CronTrigger.from_crontab(self._cron)
-                            self._scheduler.add_job(self._task, cron_trigger,
-                                                  name="Transmission错误种子清理")
-                            logger.info(f"Transmission错误种子清理服务启动，周期：{self._cron}")
-                        except Exception as e:
-                            logger.error(f"cron表达式解析失败：{self._cron}")
-                            self._enabled = False
-                            self.__update_config()
-                except Exception as e:
-                    logger.error(f"定时任务配置错误：{str(e)}")
-                    self._enabled = False
-                    self.__update_config()
+            except Exception as e:
+                logger.error(f"初始化Transmission连接失败: {str(e)}")
 
     def _task(self):
+        """
+        执行清理任务
+        """
+        # 检查Transmission客户端是否初始化
         if not self._transmission:
             logger.error("Transmission客户端未初始化")
             return
             
         logger.info("开始检查Transmission中的错误种子...")
+        # 记录本次运行时间
         self._last_run_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # 获取所有种子
@@ -100,18 +104,22 @@ class TransmissionTrackerCleaner(_PluginBase):
             logger.error(f"获取种子列表失败: {error}")
             return
             
-        # 检查每个种子的错误状态
-        deleted_count = 0
+        deleted_count = 0  # 删除计数器
+        
+        # 检查每个种子
         for torrent in torrents:
+            # 跳过没有错误的种子
             if not torrent.error or torrent.error == 0:
                 continue
                 
-            # 检查错误信息是否匹配模式
+            # 获取错误信息
             error_str = getattr(torrent, "errorString", "") or ""
+            
+            # 检查错误信息是否匹配任何模式
             if not any(pattern.lower() in error_str.lower() for pattern in self._error_patterns):
                 continue
                 
-            # 记录要删除的种子
+            # 记录发现的错误种子
             logger.info(f"发现错误种子: {torrent.name} (ID: {torrent.id}), 错误信息: {error_str}")
             
             # 如果是模拟运行模式，只记录不删除
@@ -122,7 +130,10 @@ class TransmissionTrackerCleaner(_PluginBase):
                 
             # 实际删除种子
             try:
-                if self._transmission.delete_torrents(delete_file=self._delete_files, ids=torrent.id):
+                if self._transmission.delete_torrents(
+                    delete_file=self._delete_files, 
+                    ids=torrent.id
+                ):
                     logger.info(f"已删除种子: {torrent.name} (ID: {torrent.id})")
                     deleted_count += 1
                 else:
@@ -130,6 +141,7 @@ class TransmissionTrackerCleaner(_PluginBase):
             except Exception as e:
                 logger.error(f"删除种子时出错: {torrent.name} (ID: {torrent.id}), 错误: {str(e)}")
                 
+        # 输出结果摘要
         if deleted_count == 0:
             logger.info("没有发现需要删除的错误种子")
         else:
@@ -138,36 +150,38 @@ class TransmissionTrackerCleaner(_PluginBase):
             else:
                 logger.info(f"删除完成，共删除 {deleted_count} 个错误种子")
             
-        # 更新配置中的最后运行时间
+        # 更新配置
         self.__update_config()
 
     def __update_config(self):
+        """
+        更新插件配置
+        """
         self.update_config({
             "enabled": self._enabled,
-            "cron": self._cron,
             "onlyonce": self._onlyonce,
             "host": self._host,
             "port": self._port,
             "username": self._username,
             "password": self._password,
             "delete_files": self._delete_files,
-            "dry_run": self._dry_run,  # 新增模拟运行选项
+            "dry_run": self._dry_run,
             "error_patterns": "\n".join(self._error_patterns),
             "last_run_time": self._last_run_time
         })
 
     def get_state(self) -> bool:
+        """
+        获取插件状态
+        """
         return self._enabled
 
     def stop_service(self):
         """
-        停止定时任务
+        停止插件服务
         """
-        try:
-            if self._scheduler.get_job("Transmission错误种子清理"):
-                self._scheduler.remove_job("Transmission错误种子清理")
-        except Exception as e:
-            logger.error(f"停止定时任务出错: {str(e)}")
+        # 此版本无周期任务，无需特殊处理
+        pass
 
     @eventmanager.register(EventType.PluginAction)
     def handle_manual_clean(self, event: Event):
@@ -176,12 +190,16 @@ class TransmissionTrackerCleaner(_PluginBase):
         """
         if event:
             event_data = event.event_data
+            # 检查是否为当前插件的动作
             if not event_data or event_data.get("action") != "transmission_error_clean":
                 return
             logger.info("收到手动清理错误种子命令，开始执行...")
             self._task()
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """
+        获取插件配置表单
+        """
         return [
             {
                 'component': 'VForm',
@@ -193,7 +211,7 @@ class TransmissionTrackerCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 3
+                                    'md': 4
                                 },
                                 'content': [
                                     {
@@ -209,7 +227,7 @@ class TransmissionTrackerCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 3
+                                    'md': 4
                                 },
                                 'content': [
                                     {
@@ -225,23 +243,7 @@ class TransmissionTrackerCleaner(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'delete_files',
-                                            'label': '删除文件',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
+                                    'md': 4
                                 },
                                 'content': [
                                     {
@@ -344,11 +346,10 @@ class TransmissionTrackerCleaner(_PluginBase):
                                 },
                                 'content': [
                                     {
-                                        'component': 'VTextField',
+                                        'component': 'VSwitch',
                                         'props': {
-                                            'model': 'cron',
-                                            'label': '执行周期(cron表达式)',
-                                            'placeholder': '0 12 * * *'
+                                            'model': 'delete_files',
+                                            'label': '删除文件',
                                         }
                                     }
                                 ]
@@ -366,7 +367,7 @@ class TransmissionTrackerCleaner(_PluginBase):
                                             'model': 'error_patterns',
                                             'label': '错误信息匹配模式(每行一个)',
                                             'placeholder': 'Torrent not exists\n未注册',
-                                            'rows': 2,
+                                            'rows': 3,
                                             'auto-grow': True
                                         }
                                     }
@@ -388,11 +389,11 @@ class TransmissionTrackerCleaner(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '本插件会定期检查Transmission中的种子状态，删除匹配指定错误信息的种子\n'
-                                                    '错误信息匹配模式支持多行，每行一个匹配关键词(不区分大小写)\n'
-                                                    '执行周期使用标准cron表达式(分 时 日 月 周)\n'
-                                                    '若未勾选"删除文件"，则只删除种子任务不删除文件\n'
-                                                    '启用"模拟运行"模式时只记录不实际删除',
+                                            'text': '功能说明：\n'
+                                                    '1. 检查Transmission中的种子状态，删除匹配错误信息的种子\n'
+                                                    '2. 错误信息匹配模式支持多行，每行一个匹配关键词(不区分大小写)\n'
+                                                    '3. "模拟运行"模式下只记录不实际删除\n'
+                                                    '4. "删除文件"选项控制是否同时删除文件',
                                             'style': 'white-space: pre-line;'
                                         }
                                     },
@@ -410,8 +411,9 @@ class TransmissionTrackerCleaner(_PluginBase):
                                         'props': {
                                             'type': 'warning',
                                             'variant': 'tonal',
-                                            'text': '警告：文件删除操作不可逆，请谨慎操作！\n'
-                                                    '建议首次使用时启用"模拟运行"模式',
+                                            'text': '警告：\n'
+                                                    '1. 文件删除操作不可逆，请谨慎操作！\n'
+                                                    '2. 建议首次使用时启用"模拟运行"模式',
                                             'style': 'white-space: pre-line;'
                                         }
                                     }
@@ -423,10 +425,9 @@ class TransmissionTrackerCleaner(_PluginBase):
             }
         ], {
             "enabled": False,
-            "cron": "0 12 * * *",
             "onlyonce": False,
-            "delete_files": True,
             "dry_run": True,
+            "delete_files": True,
             "host": "192.168.1.100",
             "port": 9091,
             "username": "admin",
@@ -450,7 +451,13 @@ class TransmissionTrackerCleaner(_PluginBase):
         ]
 
     def get_api(self) -> List[Dict[str, Any]]:
+        """
+        获取API
+        """
         pass
 
     def get_command(self) -> List[Dict[str, Any]]:
+        """
+        获取命令
+        """
         pass
