@@ -11,7 +11,7 @@ class TransmissionCleaner(_PluginBase):
     plugin_name = "Transmission冗余文件清理"
     plugin_desc = "查找并删除Transmission下载目录中未关联任何种子的冗余文件"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
-    plugin_version = "1.6"  # 版本号更新
+    plugin_version = "1.7"  # 版本号更新
     plugin_author = "Aspeternity"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissioncleaner_"
@@ -25,10 +25,10 @@ class TransmissionCleaner(_PluginBase):
     _port: int = None
     _username: str = None
     _password: str = None
-    _download_dir: str = None
+    _download_dirs: List[str] = None  # 修改为列表存储多个目录
     _dry_run: bool = True  # Default to dry run for safety
     _delete_images_nfo: bool = False  # 是否删除图片/NFO文件
-    _delete_system_files: bool = False  # 新增：是否删除系统文件
+    _delete_system_files: bool = False  # 是否删除系统文件
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -37,10 +37,12 @@ class TransmissionCleaner(_PluginBase):
             self._port = config.get("port")
             self._username = config.get("username")
             self._password = config.get("password")
-            self._download_dir = config.get("download_dir")
+            # 处理多目录输入，按行分割并去除空行和前后空格
+            dirs_str = config.get("download_dirs", "")
+            self._download_dirs = [d.strip() for d in dirs_str.split('\n') if d.strip()]
             self._dry_run = config.get("dry_run", True)
             self._delete_images_nfo = config.get("delete_images_nfo", False)
-            self._delete_system_files = config.get("delete_system_files", False)  # 加载配置
+            self._delete_system_files = config.get("delete_system_files", False)
             
         if self._onlyonce:
             try:
@@ -56,7 +58,7 @@ class TransmissionCleaner(_PluginBase):
             logger.error("Transmission客户端未初始化")
             return
             
-        if not self._download_dir:
+        if not self._download_dirs:
             logger.error("未配置下载目录")
             return
             
@@ -78,37 +80,42 @@ class TransmissionCleaner(_PluginBase):
                 logger.warning(f"获取种子文件失败: {torrent.name}, 错误: {str(e)}")
                 continue
                 
-        # Walk through download directory to find redundant files
+        # Walk through download directories to find redundant files
         redundant_files = []
         total_size = 0
         
-        # Check for files directly in download directory
-        for root, dirs, files in os.walk(self._download_dir):
-            # 如果不删除系统文件，则跳过@eaDir目录
-            if not self._delete_system_files and '@eaDir' in root:
+        for download_dir in self._download_dirs:
+            if not os.path.isdir(download_dir):
+                logger.warning(f"目录不存在或不可访问: {download_dir}")
                 continue
                 
-            for file in files:
-                file_path = os.path.normpath(os.path.join(root, file))
-                
-                # 如果不删除系统文件，则跳过系统文件
-                if not self._delete_system_files and (
-                    file.startswith('SYNOINDEX_') or 
-                    file.startswith('.') or 
-                    file == 'Thumbs.db'
-                ):
+            # Check for files directly in download directory
+            for root, dirs, files in os.walk(download_dir):
+                # 如果不删除系统文件，则跳过@eaDir目录
+                if not self._delete_system_files and '@eaDir' in root:
                     continue
                     
-                # 根据用户选择过滤图片/NFO文件
-                if not self._delete_images_nfo:
-                    file_ext = os.path.splitext(file)[1].lower()
-                    if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.nfo', '.txt']:
-                        logger.debug(f"跳过图片/NFO文件: {file_path}")
+                for file in files:
+                    file_path = os.path.normpath(os.path.join(root, file))
+                    
+                    # 如果不删除系统文件，则跳过系统文件
+                    if not self._delete_system_files and (
+                        file.startswith('SYNOINDEX_') or 
+                        file.startswith('.') or 
+                        file == 'Thumbs.db'
+                    ):
                         continue
                         
-                if file_path not in active_files:
-                    redundant_files.append(file_path)
-                    total_size += os.path.getsize(file_path)
+                    # 根据用户选择过滤图片/NFO文件
+                    if not self._delete_images_nfo:
+                        file_ext = os.path.splitext(file)[1].lower()
+                        if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.nfo', '.txt']:
+                            logger.debug(f"跳过图片/NFO文件: {file_path}")
+                            continue
+                            
+                    if file_path not in active_files:
+                        redundant_files.append(file_path)
+                        total_size += os.path.getsize(file_path)
                     
         if not redundant_files:
             logger.info("没有找到冗余文件")
@@ -152,10 +159,10 @@ class TransmissionCleaner(_PluginBase):
             "port": self._port,
             "username": self._username,
             "password": self._password,
-            "download_dir": self._download_dir,
+            "download_dirs": "\n".join(self._download_dirs),  # 保存为多行文本
             "dry_run": self._dry_run,
             "delete_images_nfo": self._delete_images_nfo,
-            "delete_system_files": self._delete_system_files  # 保存新配置项
+            "delete_system_files": self._delete_system_files
         })
 
     @staticmethod
@@ -239,7 +246,6 @@ class TransmissionCleaner(_PluginBase):
                             }
                         ]
                     },
-                    # 保留原有的所有输入框
                     {
                         'component': 'VRow',
                         'content': [
@@ -328,11 +334,13 @@ class TransmissionCleaner(_PluginBase):
                                 },
                                 'content': [
                                     {
-                                        'component': 'VTextField',
+                                        'component': 'VTextarea',
                                         'props': {
-                                            'model': 'download_dir',
-                                            'label': '下载目录',
-                                            'placeholder': '/data/downloads'
+                                            'model': 'download_dirs',
+                                            'label': '下载目录（每行一个）',
+                                            'placeholder': '/data/downloads\n/data/downloads2',
+                                            'rows': 3,
+                                            'auto-grow': True
                                         }
                                     }
                                 ]
@@ -356,7 +364,8 @@ class TransmissionCleaner(_PluginBase):
                                             'text': '本插件会扫描Transmission下载目录，查找不属于任何活跃种子的文件\n'
                                                     '建议首次使用时启用"模拟运行"模式，确认无误后再关闭模拟模式进行实际删除\n'
                                                     '若未勾选"删除图片/NFO文件"，则跳过.jpg/.png/.nfo等文件\n'
-                                                    '若未勾选"删除系统文件"，则跳过@eaDir/SYNOINDEX_*等系统文件',
+                                                    '若未勾选"删除系统文件"，则跳过@eaDir/SYNOINDEX_*等系统文件\n'
+                                                    '可以在"下载目录"中输入多个目录，每行一个',
                                             'style': 'white-space: pre-line;'
                                         }
                                     },
@@ -379,12 +388,12 @@ class TransmissionCleaner(_PluginBase):
             "onlyonce": False,
             "dry_run": True,
             "delete_images_nfo": False,
-            "delete_system_files": False,  # 默认不删除系统文件
+            "delete_system_files": False,
             "host": "192.168.1.100",
             "port": 9091,
             "username": "admin",
             "password": "password",
-            "download_dir": ""
+            "download_dirs": ""
         }
 
     def get_page(self) -> List[dict]:
