@@ -11,7 +11,7 @@ class TransmissionCleaner(_PluginBase):
     plugin_name = "Transmission冗余文件清理"
     plugin_desc = "查找并删除Transmission下载目录中未关联任何种子的冗余文件"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
-    plugin_version = "1.5"  # 版本号更新
+    plugin_version = "1.6"  # 版本号更新
     plugin_author = "Aspeternity"
     author_url = "https://github.com/Aspeternity"
     plugin_config_prefix = "transmissioncleaner_"
@@ -239,7 +239,106 @@ class TransmissionCleaner(_PluginBase):
                             }
                         ]
                     },
-                    # 其余部分保持不变...
+                    # 保留原有的所有输入框
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'host',
+                                            'label': 'Transmission主机IP',
+                                            'placeholder': '192.168.1.100'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'port',
+                                            'label': 'Transmission端口',
+                                            'placeholder': '9091'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'username',
+                                            'label': '用户名',
+                                            'placeholder': 'admin'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'password',
+                                            'label': '密码',
+                                            'placeholder': 'password'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'download_dir',
+                                            'label': '下载目录',
+                                            'placeholder': '/data/downloads'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
                     {
                         'component': 'VRow',
                         'content': [
