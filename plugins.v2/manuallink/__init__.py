@@ -27,13 +27,13 @@ class ManualLink(_PluginBase):
     # 插件描述
     plugin_desc = "手动选择文件或目录进行硬链接操作。"
     # 插件图标
-    plugin_icon = "Linkace_C.png"
+    plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
     # 插件版本
     plugin_version = "1.0"
     # 插件作者
-    plugin_author = "修改版"
+    plugin_author = "Aspeternity"
     # 作者主页
-    author_url = "https://github.com/jxxghp"
+    author_url = "https://github.com/Aspeternity"
     # 插件配置项ID前缀
     plugin_config_prefix = "manuallink_"
     # 加载顺序
