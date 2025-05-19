@@ -1,17 +1,10 @@
-import datetime
 import re
 import threading
-import traceback
 from pathlib import Path
-from typing import List, Tuple, Dict, Any, Optional
-
-import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+from typing import List, Dict, Any, Tuple, Optional
 
 from app import schemas
 from app.core.config import settings
-from app.core.event import eventmanager, Event
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
@@ -29,7 +22,7 @@ class ManualLink(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/chapter.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     # 插件作者
     plugin_author = "Aspeternity"
     # 作者主页
@@ -40,35 +33,22 @@ class ManualLink(_PluginBase):
     plugin_order = 4
     # 可使用的用户级别
     auth_level = 1
+   
 
     # 私有属性
-    _scheduler = None
     _enabled = False
     _notify = False
-    _onlyonce = False
     _size = 0
     # 排除关键词
     _exclude_keywords = ""
-    # 退出事件
-    _event = threading.Event()
 
     def init_plugin(self, config: dict = None):
         # 读取配置
         if config:
             self._enabled = config.get("enabled")
             self._notify = config.get("notify")
-            self._onlyonce = config.get("onlyonce")
             self._exclude_keywords = config.get("exclude_keywords") or ""
             self._size = config.get("size") or 0
-
-        # 停止现有任务
-        self.stop_service()
-
-        if self._onlyonce:
-            # 关闭一次性开关
-            self._onlyonce = False
-            # 保存配置
-            self.__update_config()
 
     def __update_config(self):
         """
@@ -77,48 +57,9 @@ class ManualLink(_PluginBase):
         self.update_config({
             "enabled": self._enabled,
             "notify": self._notify,
-            "onlyonce": self._onlyonce,
             "exclude_keywords": self._exclude_keywords,
             "size": self._size
         })
-
-    @eventmanager.register(EventType.PluginAction)
-    def remote_link(self, event: Event):
-        """
-        远程手动硬链接
-        """
-        if event:
-            event_data = event.event_data
-            if not event_data or event_data.get("action") != "manual_link":
-                return
-            
-            # 获取参数
-            source_path = event_data.get("source_path")
-            target_path = event_data.get("target_path")
-            is_dir = event_data.get("is_dir", False)
-            
-            if not source_path or not target_path:
-                self.post_message(channel=event.event_data.get("channel"),
-                                title="参数错误",
-                                text="需要提供源路径和目标路径",
-                                userid=event.event_data.get("user"))
-                return
-                
-            self.post_message(channel=event.event_data.get("channel"),
-                            title="开始手动硬链接 ...",
-                            userid=event.event_data.get("user"))
-            
-            # 执行硬链接
-            if is_dir:
-                success, failed = self.link_directory(Path(source_path), Path(target_path))
-            else:
-                success, failed = self.link_file(Path(source_path), Path(target_path))
-            
-            # 发送结果通知
-            self.post_message(channel=event.event_data.get("channel"),
-                            title="手动硬链接完成！",
-                            text=f"成功: {success}, 失败: {failed}",
-                            userid=event.event_data.get("user"))
 
     def link_file(self, source_path: Path, target_path: Path) -> Tuple[int, int]:
         """
@@ -213,55 +154,6 @@ class ManualLink(_PluginBase):
     def get_state(self) -> bool:
         return self._enabled
 
-    @staticmethod
-    def get_command() -> List[Dict[str, Any]]:
-        """
-        定义远程控制命令
-        :return: 命令关键字、事件、描述、附带数据
-        """
-        return [{
-            "cmd": "/manual_link",
-            "event": EventType.PluginAction,
-            "desc": "手动硬链接文件或目录",
-            "category": "管理",
-            "data": {
-                "action": "manual_link"
-            }
-        }]
-
-    def get_api(self) -> List[Dict[str, Any]]:
-        return [{
-            "path": "/manual_link",
-            "endpoint": self.manual_link_api,
-            "methods": ["POST"],
-            "summary": "手动硬链接API",
-            "description": "通过API手动硬链接文件或目录",
-        }]
-
-    def manual_link_api(self, source_path: str, target_path: str, is_dir: bool = False) -> schemas.Response:
-        """
-        API调用手动硬链接
-        """
-        try:
-            if is_dir:
-                success, failed = self.link_directory(Path(source_path), Path(target_path))
-            else:
-                success, failed = self.link_file(Path(source_path), Path(target_path))
-                
-            return schemas.Response(
-                success=True,
-                message=f"操作完成，成功: {success}, 失败: {failed}",
-                data={
-                    "success": success,
-                    "failed": failed
-                }
-            )
-        except Exception as e:
-            return schemas.Response(
-                success=False,
-                message=str(e)
-            )
-
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
             {
@@ -347,43 +239,17 @@ class ManualLink(_PluginBase):
                                 ]
                             }
                         ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'text': '使用说明：\n'
-                                                   '1. 通过远程命令或API调用手动硬链接功能\n'
-                                                   '2. 最小文件大小：小于此值的文件将直接复制而非硬链接\n'
-                                                   '3. 排除关键词：匹配这些关键词的文件将被跳过'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
                     }
                 ]
             }
         ], {
             "enabled": False,
             "notify": False,
-            "onlyonce": False,
             "exclude_keywords": "",
             "size": ""
         }
 
     def get_page(self) -> List[dict]:
-        # 可以在这里添加一个简单的操作页面
         return [
             {
                 'component': 'VCard',
@@ -395,12 +261,131 @@ class ManualLink(_PluginBase):
                         },
                         'content': [
                             {
-                                'component': 'VAlert',
-                                'props': {
-                                    'type': 'info',
-                                    'variant': 'tonal',
-                                    'text': '请通过远程命令或API调用手动硬链接功能'
-                                }
+                                'component': 'VForm',
+                                'ref': 'linkForm',
+                                'content': [
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 6
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'source_path',
+                                                            'label': '源路径',
+                                                            'placeholder': '请输入或选择要硬链接的文件/目录路径',
+                                                            'rules': [
+                                                                {
+                                                                    'required': True,
+                                                                    'message': '请输入源路径',
+                                                                    'trigger': 'blur'
+                                                                }
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 6
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'target_path',
+                                                            'label': '目标路径',
+                                                            'placeholder': '请输入或选择硬链接目标目录',
+                                                            'rules': [
+                                                                {
+                                                                    'required': True,
+                                                                    'message': '请输入目标路径',
+                                                                    'trigger': 'blur'
+                                                                }
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VCheckbox',
+                                                        'props': {
+                                                            'model': 'is_directory',
+                                                            'label': '是否为目录'
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VBtn',
+                                                        'props': {
+                                                            'variant': 'tonal',
+                                                            'block': True,
+                                                            'color': 'primary',
+                                                            'text': '执行硬链接',
+                                                            'click': 'do_link'
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VAlert',
+                                                        'props': {
+                                                            'type': 'info',
+                                                            'variant': 'tonal',
+                                                            'text': '操作说明：\n'
+                                                                   '1. 输入或选择源路径和目标路径\n'
+                                                                   '2. 如果是目录操作，请勾选"是否为目录"\n'
+                                                                   '3. 点击"执行硬链接"按钮开始操作\n'
+                                                                   '4. 小于最小文件大小的文件将直接复制'
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
                             }
                         ]
                     }
@@ -409,13 +394,5 @@ class ManualLink(_PluginBase):
         ]
 
     def stop_service(self):
-        """
-        退出插件
-        """
-        if self._scheduler:
-            self._scheduler.remove_all_jobs()
-            if self._scheduler.running:
-                self._event.set()
-                self._scheduler.shutdown()
-                self._event.clear()
-            self._scheduler = None
+        pass
+
